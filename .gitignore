@@ -1,0 +1,42 @@
+# 環境與金鑰（絕不提交）
+.env
+.env.*
+*.env
+**/.env
+**/.env.*
+**/.env.*.*
+trading_system/**/.env*
+trading_system/**/.env.*
+!.env.example
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+.eggs/
+dist/
+build/
+
+# 交易系統：資料庫、日誌、備份
+**/db/*.db
+**/logs/*.log
+**/*.db
+*.log
+*.swo
+*.swp
+
+# IDE / 編輯器
+.cursor/
+.cursor-server/
+.vscode/
+.vscode-server/
+.idea/
+*.sublime-*
+
+# 系統 / 本機
+.cache/
+*.local
+.ssh/

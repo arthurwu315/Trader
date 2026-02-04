@@ -1,0 +1,202 @@
+"""
+Backtest Bot B - Grid Search (Quick)
+"""
+from __future__ import annotations
+
+import argparse
+import logging
+import sys
+from dataclasses import asdict
+from datetime import datetime, timedelta, timezone
+from itertools import product
+
+from dotenv import load_dotenv
+
+from backtest_utils import (
+    BacktestMarketDataManager,
+    TradeResult,
+    fetch_klines_df,
+    simulate_trade,
+    simulate_trade_with_ema_exit,
+    simulate_trade_two_stage,
+    summarize_results,
+)
+
+ROOT = __import__("pathlib").Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
+
+load_dotenv(dotenv_path=ROOT / "bots" / "bot_b" / ".env.b_testnet", override=True)
+import os  # noqa: E402
+os.environ["SKIP_CONFIG_VALIDATION"] = "1"
+
+from bots.bot_b.config_b import get_strategy_b_config  # noqa: E402
+from bots.bot_b.strategy_b_core import StrategyBCore  # noqa: E402
+from core.binance_client import BinanceFuturesClient  # noqa: E402
+
+
+def setup_logging():
+    logging.basicConfig(
+        level=logging.WARNING,
+        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+        handlers=[logging.StreamHandler()]
+    )
+    logging.getLogger("bots.bot_b.strategy_b_core").setLevel(logging.ERROR)
+
+
+def parse_args():
+    parser = argparse.ArgumentParser(description="Grid search for Bot B")
+    parser.add_argument("--days", type=int, default=30, help="Lookback days")
+    parser.add_argument("--top", type=int, default=10, help="Top N results")
+    parser.add_argument("--max-combos", type=int, default=10, help="Limit grid combinations")
+    return parser.parse_args()
+
+
+def run_backtest(config, md, data_entry):
+    strategy = StrategyBCore(config, md)
+    trades: list[TradeResult] = []
+    i = 50
+    while i < len(data_entry) - 2:
+        current_time = data_entry["timestamp"].iloc[i]
+        md.set_time(current_time)
+
+        signal = None
+        l1_pass, _, _ = strategy.l1_gate.check_long_environment(md)
+        if l1_pass:
+            has_signal, _, signal = strategy.l2_gate.check_entry_pattern(
+                md,
+                l1_passed=l1_pass,
+                bar_index=i
+            )
+
+        if signal is None and getattr(config, "enable_short", True):
+            l1_short_pass, _, _ = strategy.l1_gate.check_short_environment(md)
+            if l1_short_pass:
+                has_signal, _, signal = strategy.l2_gate.check_entry_pattern_short(
+                    md,
+                    l1_passed=l1_short_pass,
+                    bar_index=i
+                )
+
+        if signal:
+            entry_price = signal.entry_price
+            stop_price = signal.stop_loss
+            tp_price = signal.tp1_price
+            side = "BUY" if signal.signal_type == "LONG" else "SELL"
+
+            if getattr(config, "enable_ema_exit", False):
+                exit_idx, exit_price, gross_return, exit_time = simulate_trade_with_ema_exit(
+                    data_entry,
+                    i + 1,
+                    side,
+                    entry_price,
+                    stop_price,
+                    tp_price,
+                    ema_period=int(getattr(config, "ema_exit_period", 20)),
+                )
+            elif getattr(config, "enable_partial_tp", True) and signal.tp2_price:
+                exit_idx, exit_price, gross_return, exit_time = simulate_trade_two_stage(
+                    data_entry,
+                    i + 1,
+                    side,
+                    entry_price,
+                    stop_price,
+                    tp_price,
+                    signal.tp2_price,
+                    partial_ratio=float(getattr(config, "partial_tp_ratio", 0.5)),
+                )
+            else:
+                exit_idx, exit_price, exit_time = simulate_trade(
+                    data_entry, i + 1, side, entry_price, stop_price, tp_price
+                )
+                direction = 1 if side == "BUY" else -1
+                gross_return = (exit_price - entry_price) / entry_price * direction * 100
+            costs = (config.fee_taker * 2 + config.slippage_buffer) * 100
+            net_return = gross_return - costs
+
+            trades.append(
+                TradeResult(
+                    entry_time=current_time,
+                    exit_time=exit_time,
+                    entry_price=entry_price,
+                    exit_price=exit_price,
+                    side=side,
+                    return_pct=net_return,
+                    win=net_return > 0,
+                )
+            )
+
+            i = exit_idx + 1
+            continue
+
+        i += 1
+
+    summary = summarize_results(trades)
+    return summary
+
+
+def main():
+    setup_logging()
+    args = parse_args()
+
+    base_config = get_strategy_b_config()
+    data_base_url = os.getenv("BINANCE_DATA_URL", "https://fapi.binance.com")
+    client = BinanceFuturesClient(
+        api_key=base_config.binance_api_key,
+        api_secret=base_config.binance_api_secret,
+        base_url=data_base_url,
+    )
+
+    end_dt = datetime.now(timezone.utc)
+    start_dt = end_dt - timedelta(days=args.days)
+
+    data_15m = fetch_klines_df(client, base_config.symbol, "15m", start_dt, end_dt)
+    entry_interval = getattr(base_config, "entry_interval", "3m")
+    if entry_interval == "15m":
+        data_entry = data_15m
+    else:
+        data_entry = fetch_klines_df(client, base_config.symbol, entry_interval, start_dt, end_dt)
+    htf_extra_days = int((base_config.l1_htf_slow_ema + 5) * 4 / 24) + 5
+    htf_start_dt = end_dt - timedelta(days=args.days + htf_extra_days)
+    data_4h = fetch_klines_df(client, base_config.symbol, "4h", htf_start_dt, end_dt)
+
+    if data_entry.empty or data_15m.empty or data_4h.empty:
+        print("無法取得足夠K線數據")
+        return
+
+    md = BacktestMarketDataManager({entry_interval: data_entry, "15m": data_15m, "4h": data_4h})
+
+    grid = {
+        "tp_rr_multiple": [1.0, 1.3, 1.6],
+        "tp_min_fixed_pct": [0.003, 0.004],
+        "min_tp_after_costs_pct": [0.001, 0.0015],
+        "ema_exit_period": [10, 20, 30],
+        "l1_min_ema20_slope_pct": [0.03, 0.05],
+        "l1_volume_sma_mult": [0.9, 1.0],
+        "l2_breakout_volume_mult": [1.1, 1.3],
+        "l1_atr_min_percentile": [30.0, 40.0],
+    }
+
+    keys = list(grid.keys())
+    results = []
+
+    for idx, values in enumerate(product(*[grid[k] for k in keys])):
+        if idx >= args.max_combos:
+            break
+        config = get_strategy_b_config()
+        for k, v in zip(keys, values):
+            setattr(config, k, v)
+        config.enable_ema_exit = True
+        config.enable_partial_tp = False
+
+        summary = run_backtest(config, md, data_entry)
+        results.append((summary, {k: getattr(config, k) for k in keys}))
+
+    results.sort(key=lambda x: x[0]["expectancy_pct"], reverse=True)
+
+    print(f"Bot B Grid Search (days={args.days})")
+    for summary, params in results[:args.top]:
+        print(f"Expectancy: {summary['expectancy_pct']:.4f}% | WinRate: {summary['win_rate']:.2f}% | Trades: {summary['trades']} | Params: {params}")
+
+
+if __name__ == "__main__":
+    main()
