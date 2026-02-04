@@ -43,6 +43,8 @@ def setup_logging():
 def parse_args():
     parser = argparse.ArgumentParser(description="Quick backtest for Bot C")
     parser.add_argument("--days", type=int, default=60, help="Lookback days")
+    parser.add_argument("--start-date", type=str, default=None, help="Start date YYYYMMDD")
+    parser.add_argument("--end-date", type=str, default=None, help="End date YYYYMMDD")
     return parser.parse_args()
 
 
@@ -58,8 +60,14 @@ def main():
         base_url=data_base_url,
     )
 
-    end_dt = datetime.now(timezone.utc)
-    start_dt = end_dt - timedelta(days=args.days)
+    if args.start_date and args.end_date:
+        start_dt = datetime.strptime(args.start_date, "%Y%m%d").replace(tzinfo=timezone.utc)
+        end_dt = datetime.strptime(args.end_date, "%Y%m%d").replace(tzinfo=timezone.utc)
+        days = max((end_dt - start_dt).days, 1)
+    else:
+        end_dt = datetime.now(timezone.utc)
+        start_dt = end_dt - timedelta(days=args.days)
+        days = args.days
 
     data_15m = fetch_klines_df(client, config.symbol, "15m", start_dt, end_dt)
     entry_interval = getattr(config, "entry_interval", "3m")
@@ -67,10 +75,16 @@ def main():
         data_entry = data_15m
     else:
         data_entry = fetch_klines_df(client, config.symbol, entry_interval, start_dt, end_dt)
-    if data_entry.empty or data_15m.empty:
+    htf_slow = int(getattr(config, "l1_htf_slow_ema", 200))
+    htf_extra_days = int((htf_slow + 5) * 4 / 24) + 5
+    htf_start_dt = end_dt - timedelta(days=days + htf_extra_days)
+    data_4h = fetch_klines_df(client, config.symbol, "4h", htf_start_dt, end_dt)
+    if data_4h.empty:
+        data_4h = fetch_klines_df(client, config.symbol, "4h", start_dt, end_dt)
+    if data_entry.empty or data_15m.empty or data_4h.empty:
         logging.error("無法取得足夠K線數據")
         return
-    md = BacktestMarketDataManager({entry_interval: data_entry, "15m": data_15m})
+    md = BacktestMarketDataManager({entry_interval: data_entry, "15m": data_15m, "4h": data_4h})
     strategy = StrategyCCore(config, md)
 
     trades: list[TradeResult] = []
@@ -151,11 +165,16 @@ def main():
         i += 1
 
     summary = summarize_results(trades)
-    print(f"Bot C Backtest (days={args.days})")
+    trades_per_day = summary["trades"] / max(days, 1)
+    weekly_est = summary["expectancy_pct"] * trades_per_day * 7
+    print(f"Bot C Backtest (days={days})")
+    print(f"Range: {start_dt.date()} -> {end_dt.date()}")
     print(f"Trades: {summary['trades']}")
     print(f"Win Rate: {summary['win_rate']:.2f}%")
     print(f"Avg Return: {summary['avg_return_pct']:.4f}%")
     print(f"Expectancy: {summary['expectancy_pct']:.4f}%")
+    print(f"Trades/Day: {trades_per_day:.2f}")
+    print(f"Est Weekly Return: {weekly_est:.2f}%")
 
 
 if __name__ == "__main__":

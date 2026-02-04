@@ -19,6 +19,24 @@ def _to_ms(dt: datetime) -> int:
     return int(dt.timestamp() * 1000)
 
 
+def _find_covering_cache(cache_dir: Path, symbol: str, interval: str, start_key: str, end_key: str) -> Optional[Path]:
+    """
+    Find a cached file that fully covers [start_key, end_key].
+    """
+    prefix = f"{symbol}_{interval}_"
+    for name in os.listdir(cache_dir):
+        if not name.startswith(prefix) or not name.endswith(".csv"):
+            continue
+        parts = name.replace(".csv", "").split("_")
+        if len(parts) < 4:
+            continue
+        cached_start = parts[-2]
+        cached_end = parts[-1]
+        if cached_start <= start_key and cached_end >= end_key:
+            return cache_dir / name
+    return None
+
+
 def fetch_klines_df(client, symbol: str, interval: str, start_dt: datetime, end_dt: datetime) -> pd.DataFrame:
     cache_dir = Path(os.getenv("BACKTEST_CACHE_DIR", "/home/trader/trading_system/tests/.cache"))
     cache_dir.mkdir(parents=True, exist_ok=True)
@@ -33,6 +51,18 @@ def fetch_klines_df(client, symbol: str, interval: str, start_dt: datetime, end_
             return df_cached
         except Exception:
             pass
+    else:
+        if os.getenv("BACKTEST_OFFLINE") == "1":
+            covering = _find_covering_cache(cache_dir, symbol, interval, start_key, end_key)
+            if covering and covering.exists():
+                try:
+                    df_cached = pd.read_csv(covering)
+                    df_cached["timestamp"] = pd.to_datetime(df_cached["timestamp"], utc=True)
+                    mask = (df_cached["timestamp"] >= start_dt) & (df_cached["timestamp"] <= end_dt)
+                    return df_cached.loc[mask].reset_index(drop=True)
+                except Exception:
+                    return pd.DataFrame(columns=["timestamp", "open", "high", "low", "close", "volume"])
+            return pd.DataFrame(columns=["timestamp", "open", "high", "low", "close", "volume"])
 
     start_ms = _to_ms(start_dt)
     end_ms = _to_ms(end_dt)

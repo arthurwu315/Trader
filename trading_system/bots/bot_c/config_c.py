@@ -26,7 +26,7 @@ class ConfigStrategyC:
     cooldown_minutes_after_loss: int = 45
     max_consecutive_losses: int = 3
     enable_long: bool = True
-    enable_short: bool = False
+    enable_short: bool = True
     
     # ==================== 風險與槓桿（提高單筆報酬潛力，維持正期望） ====================
     risk_per_trade_pct: float = 0.0025  # 0.25%
@@ -37,16 +37,31 @@ class ConfigStrategyC:
     max_leverage_usage: float = 0.55
 
     # ==================== L1/L2（頻率調整） ====================
-    # L1: EMA20 趨勢放寬
-    l1_ema20_tolerance_pct: float = 0.0010  # 允許價格略低於EMA20
-    l1_ema20_rising_bars: int = 3
+    # L1: EMA20 趨勢放寬（提高交易次數，但不破壞趨勢濾網）
+    l1_ema20_tolerance_pct: float = 0.0040  # 允許價格略低於EMA20
+    l1_ema20_rising_bars: int = 1
+    l1_ema20_falling_bars: int = 2
     l1_use_structure_filter: bool = True
+    l1_ema20_slope_bars: int = 4
+    l1_min_ema20_slope_pct: float = 0.02
+    l1_use_ema50_filter: bool = False
+    l1_ema50_rising_bars: int = 2
+    l1_ema50_falling_bars: int = 2
+    l1_ema20_tolerance_short_pct: float = 0.0030
+    l1_use_macro_filter_short: bool = True
+    l1_macro_short_mode: str = "any"
+    l1_macro_short_tolerance_pct: float = 0.005
+    l1_volume_lookback: int = 20
+    l1_volume_sma_mult: float = 1.0
+    l1_atr_period: int = 14
+    l1_atr_lookback: int = 100
+    l1_atr_min_percentile: float = 25.0
 
-    # L2: Breakout/回踩放寬
-    l2_breakout_lookback: int = 18
-    l2_breakout_buffer_pct: float = 0.00015
-    l2_retest_buffer_pct: float = 0.00008
-    l2_pullback_max_bars: int = 14
+    # L2: Breakout/回踩（中度收緊）
+    l2_breakout_lookback: int = 20
+    l2_breakout_buffer_pct: float = 0.0002
+    l2_retest_buffer_pct: float = 0.0001
+    l2_pullback_max_bars: int = 12
 
     # 與 strategy_c_core L2Gate 對齊（與 B 同參數名）
     structure_lookback_bars: int = 20
@@ -58,15 +73,15 @@ class ConfigStrategyC:
     entry_interval: str = "3m"
 
     # ==================== TP 調整（朝週1%：略高RR、保底淨利，維持正期望） ====================
-    tp_rr_multiple: float = 1.7
-    tp_min_fixed_pct: float = 0.0055  # 0.55%
+    tp_rr_multiple: float = 3.0
+    tp_min_fixed_pct: float = 0.0100  # 1.00%
     dynamic_rr_enabled: bool = True
     rr_slope_bars: int = 5
     rr_slope_threshold_pct: float = 0.05
     rr_slope_boost: float = 0.3
     enable_partial_tp: bool = True
     partial_tp_ratio: float = 0.5
-    tp2_rr_multiple: float = 2.2
+    tp2_rr_multiple: float = 4.0
     enable_ema_exit: bool = False
     ema_exit_period: int = 20
     l2_ema20_rising_bars: int = 2
@@ -81,7 +96,7 @@ class ConfigStrategyC:
     fee_taker: float = 0.00045  # 0.045%
     slippage_buffer: float = 0.0005  # 0.05%
     # ✅ 最小淨利（維持正期望）
-    min_tp_after_costs_pct: float = 0.0018  # 0.18%
+    min_tp_after_costs_pct: float = 0.0030  # 0.30%
     
     # ==================== 資料週期 ====================
     tf_filter: str = "15m"
