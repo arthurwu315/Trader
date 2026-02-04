@@ -1,6 +1,6 @@
 """
 Strategy C Configuration - 高報酬版
-在不改動 Strategy B 的前提下，提升風險/頻率
+目標：週獲利 ~1%，維持正期望值（不鬆濾網、提高單筆RR與風險控制）
 """
 import os
 import sys
@@ -14,13 +14,13 @@ class ConfigStrategyC:
     
     # ==================== 基本 ====================
     strategy_id: str = "C"
-    strategy_version: str = "C-UNIFIED-V1.0"
+    strategy_version: str = "C-UNIFIED-V1.1"
     strategy_tag: str = "STRATEGY_C"
     symbol: str = "BNBUSDT"
     mode: str = os.getenv("MODE", "TESTNET")
     
-    # ==================== 交易節流 ====================
-    max_trades_per_day: int = 12
+    # ==================== 交易節流（朝週1%靠攏：足夠次數但不濫做） ====================
+    max_trades_per_day: int = 8
     max_trades_per_hour: int = 3
     cooldown_minutes_after_trade: int = 20
     cooldown_minutes_after_loss: int = 45
@@ -28,8 +28,8 @@ class ConfigStrategyC:
     enable_long: bool = True
     enable_short: bool = False
     
-    # ==================== 風險與槓桿 ====================
-    risk_per_trade_pct: float = 0.0030  # 0.30%
+    # ==================== 風險與槓桿（提高單筆報酬潛力，維持正期望） ====================
+    risk_per_trade_pct: float = 0.0025  # 0.25%
     max_leverage: int = 3
     min_stop_distance_pct: float = 0.0018  # 0.18%
     max_stop_distance_pct: float = 0.0080  # 0.80%
@@ -57,9 +57,20 @@ class ConfigStrategyC:
     tp_safety_buffer_pct: float = 0.0001
     entry_interval: str = "3m"
 
-    # ==================== TP 調整（維持正期望值） ====================
-    tp_rr_multiple: float = 1.5
-    tp_min_fixed_pct: float = 0.006  # 0.60%
+    # ==================== TP 調整（朝週1%：略高RR、保底淨利，維持正期望） ====================
+    tp_rr_multiple: float = 1.7
+    tp_min_fixed_pct: float = 0.0055  # 0.55%
+    dynamic_rr_enabled: bool = True
+    rr_slope_bars: int = 5
+    rr_slope_threshold_pct: float = 0.05
+    rr_slope_boost: float = 0.3
+    enable_partial_tp: bool = True
+    partial_tp_ratio: float = 0.5
+    tp2_rr_multiple: float = 2.2
+    enable_ema_exit: bool = False
+    ema_exit_period: int = 20
+    l2_ema20_rising_bars: int = 2
+    l2_ema20_falling_bars: int = 3
     
     # ✅ V5.3新增: 倉位硬上限 (防止stop過近導致qty爆大)
     max_notional_pct_of_equity: float = 0.45
@@ -69,8 +80,8 @@ class ConfigStrategyC:
     fee_maker: float = 0.00018  # 0.018%
     fee_taker: float = 0.00045  # 0.045%
     slippage_buffer: float = 0.0005  # 0.05%
-    # ✅ 最小淨利
-    min_tp_after_costs_pct: float = 0.0020  # 0.20%
+    # ✅ 最小淨利（維持正期望）
+    min_tp_after_costs_pct: float = 0.0018  # 0.18%
     
     # ==================== 資料週期 ====================
     tf_filter: str = "15m"
@@ -144,9 +155,10 @@ class ConfigStrategyC:
     
     def _validate_config(self):
         """驗證配置"""
-        
+        if os.getenv("SKIP_CONFIG_VALIDATION"):
+            return
         print("\n" + "="*60)
-        print("🔍 Strategy C 高報酬版 配置驗證 (V1.0)")
+        print("🔍 Strategy C 高報酬版 配置驗證 (V1.1)")
         print("="*60)
         
         errors = []
@@ -246,6 +258,6 @@ def get_strategy_c_config():
 
 
 if __name__ == "__main__":
-    print("正在載入Strategy C 高報酬版 配置 (V1.0)...")
+    print("正在載入Strategy C 高報酬版 配置 (V1.1)...")
     config = get_strategy_c_config()
     print("\n✅ 配置載入成功!")

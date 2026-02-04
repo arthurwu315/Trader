@@ -10,7 +10,11 @@ sys.path.insert(0, str(ROOT))
 
 from dotenv import load_dotenv
 
-load_dotenv(dotenv_path=Path(__file__).resolve().parent / ".env.c_live")
+# 依 MODE 載入：正式網用 .env.c_live，否則用 .env.c_testnet
+_bot_dir = Path(__file__).resolve().parent
+_env_live = _bot_dir / ".env.c_live"
+_env_testnet = _bot_dir / ".env.c_testnet"
+load_dotenv(dotenv_path=_env_live if os.getenv("MODE") == "LIVE" else _env_testnet)
 
 import logging
 import time
@@ -53,7 +57,7 @@ logger = logging.getLogger(__name__)
 
 
 class StrategyCBot:
-    """Strategy B Trading Bot - 完全正確版 V5.3"""
+    """Strategy C Trading Bot - 高報酬版"""
     
     def __init__(self):
         logger.info("="*60)
@@ -102,7 +106,7 @@ class StrategyCBot:
         
         self.env_state = EnvState()
         
-        # 策略B核心
+        # 策略C核心
         self.strategy_core = StrategyCCore(self.config, self.market_data)
         
         # 數據庫

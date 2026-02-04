@@ -20,11 +20,13 @@ __pycache__/
 dist/
 build/
 
-# 交易系統：資料庫、日誌、備份
+# 交易系統：資料庫、日誌、備份、測試快取
 **/db/*.db
 **/logs/*.log
 **/*.db
 *.log
+**/tests/.cache/
+**/.cache/
 *.swo
 *.swp
 

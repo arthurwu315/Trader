@@ -27,7 +27,7 @@ sys.path.insert(0, str(ROOT))
 load_dotenv(dotenv_path=ROOT / "bots" / "bot_c" / ".env.c_testnet", override=True)
 
 from bots.bot_c.config_c import get_strategy_c_config  # noqa: E402
-from bots.bot_c.strategy_c_core import StrategyBCore  # noqa: E402
+from bots.bot_c.strategy_c_core import StrategyCCore  # noqa: E402
 from core.binance_client import BinanceFuturesClient  # noqa: E402
 
 
@@ -71,7 +71,7 @@ def main():
         logging.error("無法取得足夠K線數據")
         return
     md = BacktestMarketDataManager({entry_interval: data_entry, "15m": data_15m})
-    strategy = StrategyBCore(config, md)
+    strategy = StrategyCCore(config, md)
 
     trades: list[TradeResult] = []
     i = 50
