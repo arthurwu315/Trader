@@ -984,6 +984,19 @@ class L2Gate:
                 )
 
                 if has_confirm:
+                    # 額外品質過濾（Strategy C 專用）
+                    if bool(getattr(self.config, "l2_require_ema_alignment", False)):
+                        if ema9 <= ema20:
+                            logger.warning("  ❌ EMA9未在EMA20上方（趨勢未對齊）")
+                            return False, "L2_EMA_ALIGN_FAIL", None
+                    max_pullback = float(getattr(self.config, "l2_max_pullback_depth_pct", 0.0))
+                    if max_pullback > 0 and self.setup.breakout_level is not None:
+                        if self.setup.pullback_low is not None:
+                            min_allowed = self.setup.breakout_level * (1 - max_pullback)
+                            if self.setup.pullback_low < min_allowed:
+                                logger.warning("  ❌ Pullback過深（品質過濾）")
+                                return False, "L2_PULLBACK_TOO_DEEP", None
+
                     self.setup.confirmed = True
                     self.setup.confirm_time = datetime.now()
                     self.setup.state = SetupState.CONFIRMED
@@ -1114,6 +1127,19 @@ class L2Gate:
                 )
 
                 if has_confirm:
+                    # 額外品質過濾（Strategy C 專用）
+                    if bool(getattr(self.config, "l2_require_ema_alignment", False)):
+                        if ema9 >= ema20:
+                            logger.warning("  ❌ EMA9未在EMA20下方（趨勢未對齊）")
+                            return False, "L2_EMA_ALIGN_FAIL", None
+                    max_pullback = float(getattr(self.config, "l2_max_pullback_depth_pct", 0.0))
+                    if max_pullback > 0 and self.short_setup.breakdown_level is not None:
+                        if self.short_setup.pullback_high is not None:
+                            max_allowed = self.short_setup.breakdown_level * (1 + max_pullback)
+                            if self.short_setup.pullback_high > max_allowed:
+                                logger.warning("  ❌ Pullback過深（品質過濾）")
+                                return False, "L2_PULLBACK_TOO_DEEP", None
+
                     self.short_setup.confirmed = True
                     self.short_setup.confirm_time = datetime.now()
                     self.short_setup.state = SetupState.CONFIRMED
@@ -1643,6 +1669,19 @@ class StrategyCCore:
         logger.info("🔍" * 30)
 
         try:
+            # === Strategy C: Macro regime filter (direction selection) ===
+            allow_long = bool(getattr(self.config, "enable_long", True))
+            allow_short = bool(getattr(self.config, "enable_short", True))
+            if bool(getattr(self.config, "c_use_macro_regime", False)):
+                long_ok, _ = self.l1_gate._check_macro_long_trend(self.market_data)
+                short_ok, _ = self.l1_gate._check_macro_short_trend(self.market_data)
+                if long_ok and not short_ok:
+                    allow_short = False
+                elif short_ok and not long_ok:
+                    allow_long = False
+                elif not long_ok and not short_ok:
+                    logger.info("🚫 MACRO_REGIME_BLOCKED")
+                    return None
             l0_pass, l0_reason = self.l0_gate.check(
                 self.state,
                 execution_safety,
@@ -1655,7 +1694,11 @@ class StrategyCCore:
                 logger.info(f"🚫 {l0_reason}")
                 return None
 
-            l1_pass, l1_reason, l1_debug = self.l1_gate.check_long_environment(self.market_data)
+            l1_pass = False
+            l1_reason = "LONG_DISABLED"
+            l1_debug = {}
+            if allow_long:
+                l1_pass, l1_reason, l1_debug = self.l1_gate.check_long_environment(self.market_data)
             if not l1_pass:
                 logger.info(f"🚫 {l1_reason}")
             else:
@@ -1684,7 +1727,7 @@ class StrategyCCore:
                 if not has_signal:
                     logger.info(f"🚫 {pattern}")
 
-            if not getattr(self.config, "enable_short", True):
+            if not allow_short:
                 return None
 
             l1_short_pass, l1_short_reason, l1_short_debug = self.l1_gate.check_short_environment(self.market_data)

@@ -27,6 +27,7 @@ class ConfigStrategyC:
     max_consecutive_losses: int = 3
     enable_long: bool = True
     enable_short: bool = True
+    c_use_macro_regime: bool = False
     
     # ==================== 風險與槓桿（提高單筆報酬潛力，維持正期望） ====================
     risk_per_trade_pct: float = 0.0025  # 0.25%
@@ -51,6 +52,9 @@ class ConfigStrategyC:
     l1_use_macro_filter_short: bool = True
     l1_macro_short_mode: str = "any"
     l1_macro_short_tolerance_pct: float = 0.005
+    l1_use_macro_filter_long: bool = False
+    l1_macro_long_mode: str = "any"
+    l1_macro_long_tolerance_pct: float = 0.003
     l1_volume_lookback: int = 20
     l1_volume_sma_mult: float = 1.0
     l1_atr_period: int = 14
@@ -62,6 +66,8 @@ class ConfigStrategyC:
     l2_breakout_buffer_pct: float = 0.0002
     l2_retest_buffer_pct: float = 0.0001
     l2_pullback_max_bars: int = 12
+    l2_require_ema_alignment: bool = False
+    l2_max_pullback_depth_pct: float = 0.0
 
     # 與 strategy_c_core L2Gate 對齊（與 B 同參數名）
     structure_lookback_bars: int = 20
