@@ -1020,6 +1020,21 @@ class L2Gate:
 
                     return True, "BREAKOUT_PULLBACK", signal
 
+            # ========== 4) Trend Pullback (Strategy C 新核心) ==========
+            if self.setup.state == SetupState.IDLE and bool(getattr(self.config, "l2_use_trend_pullback", False)):
+                signal = self._check_trend_pullback(
+                    df_3m=df_3m,
+                    ema9=ema9,
+                    ema20=ema20,
+                    ema20_series=ema20_series,
+                    entry_price=float(current_close),
+                    current_low=float(current_low),
+                    current_high=float(current_high),
+                    current_open=float(current_open),
+                )
+                if signal is not None:
+                    return True, "TREND_PULLBACK", signal
+
             return False, f"L2_STATE_{self.setup.state.value}", None
 
         except Exception as e:
@@ -1161,12 +1176,238 @@ class L2Gate:
 
                     return True, "BREAKDOWN_PULLBACK", signal
 
+            # ========== 4) Trend Pullback Short (Strategy C 新核心) ==========
+            if self.short_setup.state == SetupState.IDLE and bool(getattr(self.config, "l2_use_trend_pullback", False)):
+                signal = self._check_trend_pullback_short(
+                    df_3m=df_3m,
+                    ema9=ema9,
+                    ema20=ema20,
+                    ema20_series=ema20_series,
+                    entry_price=float(current_close),
+                    current_low=float(current_low),
+                    current_high=float(current_high),
+                    current_open=float(current_open),
+                )
+                if signal is not None:
+                    return True, "TREND_PULLBACK", signal
+
             return False, f"L2_STATE_{self.short_setup.state.value}", None
 
         except Exception as e:
             logger.error(f"L2檢查失敗: {e}", exc_info=True)
             self.short_setup.reset()
             return False, f"L2_ERROR: {str(e)}", None
+
+    def _check_trend_pullback(
+        self,
+        df_3m,
+        ema9: float,
+        ema20: float,
+        ema20_series,
+        entry_price: float,
+        current_low: float,
+        current_high: float,
+        current_open: float,
+    ) -> Optional[StrategyCSignal]:
+        """
+        Strategy C: EMA 趨勢回踩 + 動能確認
+        - 15m 環境已由 L1 過濾
+        - 3m 觸碰 EMA9/EMA20 後，收回 EMA9 並收陽
+        """
+        # Pullback 深度限制
+        max_pullback = float(getattr(self.config, "l2_max_pullback_depth_pct", 0.003))
+        if max_pullback > 0 and current_low < ema20 * (1 - max_pullback):
+            return None
+
+        pullback_hit = current_low <= ema9 or current_low <= ema20
+        if not pullback_hit:
+            return None
+
+        # 確認K：收回 EMA9 + 收陽
+        min_body_pct = float(getattr(self.config, "l2_confirm_body_pct", 0.0))
+        body_pct = abs(entry_price - current_open) / entry_price
+        if min_body_pct > 0 and body_pct < min_body_pct:
+            return None
+        if entry_price <= ema9 or entry_price <= current_open:
+            return None
+
+        # EMA 對齊（可選）
+        if bool(getattr(self.config, "l2_require_ema_alignment", False)):
+            if ema9 <= ema20:
+                return None
+
+        pullback_low = current_low
+        return self._generate_signal_trend(
+            entry_price=entry_price,
+            pullback_low=pullback_low,
+            ema9=ema9,
+            ema20=ema20,
+            ema20_series=ema20_series,
+        )
+
+    def _check_trend_pullback_short(
+        self,
+        df_3m,
+        ema9: float,
+        ema20: float,
+        ema20_series,
+        entry_price: float,
+        current_low: float,
+        current_high: float,
+        current_open: float,
+    ) -> Optional[StrategyCSignal]:
+        """
+        Strategy C: EMA 趨勢回踩 + 動能確認（空頭）
+        - 15m 環境已由 L1 過濾
+        - 3m 觸碰 EMA9/EMA20 後，收回 EMA9 下並收陰
+        """
+        max_pullback = float(getattr(self.config, "l2_max_pullback_depth_pct", 0.003))
+        if max_pullback > 0 and current_high > ema20 * (1 + max_pullback):
+            return None
+
+        pullback_hit = current_high >= ema9 or current_high >= ema20
+        if not pullback_hit:
+            return None
+
+        min_body_pct = float(getattr(self.config, "l2_confirm_body_pct", 0.0))
+        body_pct = abs(entry_price - current_open) / entry_price
+        if min_body_pct > 0 and body_pct < min_body_pct:
+            return None
+        if entry_price >= ema9 or entry_price >= current_open:
+            return None
+
+        if bool(getattr(self.config, "l2_require_ema_alignment", False)):
+            if ema9 >= ema20:
+                return None
+
+        pullback_high = current_high
+        return self._generate_signal_trend_short(
+            entry_price=entry_price,
+            pullback_high=pullback_high,
+            ema9=ema9,
+            ema20=ema20,
+            ema20_series=ema20_series,
+        )
+
+    def _generate_signal_trend(
+        self,
+        entry_price: float,
+        pullback_low: float,
+        ema9: float,
+        ema20: float,
+        ema20_series=None,
+    ) -> Optional[StrategyCSignal]:
+        if pullback_low is None:
+            return None
+
+        stop_buf = float(getattr(self.config, "stop_buffer_pct", self.stop_buffer_pct))
+        sl_price = float(pullback_low) * (1 - stop_buf)
+        sl_pct = abs(entry_price - sl_price) / entry_price
+
+        if sl_pct < self.config.min_stop_distance_pct:
+            sl_price = entry_price * (1 - self.config.min_stop_distance_pct)
+            sl_pct = self.config.min_stop_distance_pct
+        if sl_pct > self.config.max_stop_distance_pct:
+            return None
+
+        round_trip_fee = self.config.fee_taker * 2
+        slippage = self.config.slippage_buffer
+        total_cost = round_trip_fee + slippage
+
+        rr = float(getattr(self.config, "tp_rr_multiple", 2.0))
+        tp_min_fixed_pct = float(getattr(self.config, "tp_min_fixed_pct", 0.008))
+        r_dist = (entry_price - sl_price)
+        tp_by_r = entry_price + r_dist * rr
+        min_required_tp1_pct = total_cost + self.config.min_tp_after_costs_pct + self.tp_safety_buffer_pct
+        fixed_pct = max(tp_min_fixed_pct, min_required_tp1_pct)
+        tp_by_fixed = entry_price * (1 + fixed_pct)
+        tp1_price = max(tp_by_r, tp_by_fixed)
+        tp1_pct = (tp1_price - entry_price) / entry_price
+        tp1_net = tp1_pct - total_cost
+        if tp1_net < self.config.min_tp_after_costs_pct:
+            return None
+
+        rr2 = float(getattr(self.config, "tp2_rr_multiple", 2.0))
+        tp2_price = entry_price + r_dist * rr2
+
+        return StrategyCSignal(
+            signal_type="LONG",
+            pattern="TREND_PULLBACK",
+            entry_price=entry_price,
+            stop_loss=sl_price,
+            tp1_price=tp1_price,
+            tp2_price=tp2_price,
+            stop_distance_pct=sl_pct,
+            expected_tp1_pct=tp1_pct,
+            confidence=0.70,
+            reason="Trend pullback → EMA9 reclaim",
+            timestamp=datetime.now(),
+            ema20_15m=0.0,
+            ema9_3m=ema9,
+            ema20_3m=ema20,
+            breakout_level=None,
+            swing_low=None,
+        )
+
+    def _generate_signal_trend_short(
+        self,
+        entry_price: float,
+        pullback_high: float,
+        ema9: float,
+        ema20: float,
+        ema20_series=None,
+    ) -> Optional[StrategyCSignal]:
+        if pullback_high is None:
+            return None
+
+        stop_buf = float(getattr(self.config, "stop_buffer_pct", self.stop_buffer_pct))
+        sl_price = float(pullback_high) * (1 + stop_buf)
+        sl_pct = abs(entry_price - sl_price) / entry_price
+
+        if sl_pct < self.config.min_stop_distance_pct:
+            sl_price = entry_price * (1 + self.config.min_stop_distance_pct)
+            sl_pct = self.config.min_stop_distance_pct
+        if sl_pct > self.config.max_stop_distance_pct:
+            return None
+
+        round_trip_fee = self.config.fee_taker * 2
+        slippage = self.config.slippage_buffer
+        total_cost = round_trip_fee + slippage
+
+        rr = float(getattr(self.config, "tp_rr_multiple", 2.0))
+        tp_min_fixed_pct = float(getattr(self.config, "tp_min_fixed_pct", 0.008))
+        r_dist = (sl_price - entry_price)
+        tp_by_r = entry_price - r_dist * rr
+        min_required_tp1_pct = total_cost + self.config.min_tp_after_costs_pct + self.tp_safety_buffer_pct
+        fixed_pct = max(tp_min_fixed_pct, min_required_tp1_pct)
+        tp_by_fixed = entry_price * (1 - fixed_pct)
+        tp1_price = min(tp_by_r, tp_by_fixed)
+        tp1_pct = (entry_price - tp1_price) / entry_price
+        tp1_net = tp1_pct - total_cost
+        if tp1_net < self.config.min_tp_after_costs_pct:
+            return None
+
+        rr2 = float(getattr(self.config, "tp2_rr_multiple", 2.0))
+        tp2_price = entry_price - r_dist * rr2
+
+        return StrategyCSignal(
+            signal_type="SHORT",
+            pattern="TREND_PULLBACK",
+            entry_price=entry_price,
+            stop_loss=sl_price,
+            tp1_price=tp1_price,
+            tp2_price=tp2_price,
+            stop_distance_pct=sl_pct,
+            expected_tp1_pct=tp1_pct,
+            confidence=0.70,
+            reason="Trend pullback → EMA9 breakdown",
+            timestamp=datetime.now(),
+            ema20_15m=0.0,
+            ema9_3m=ema9,
+            ema20_3m=ema20,
+            breakout_level=None,
+            swing_low=None,
+        )
 
     def _detect_breakout(self, df) -> Tuple[bool, Optional[Dict]]:
         # ✅ 不包含當前K

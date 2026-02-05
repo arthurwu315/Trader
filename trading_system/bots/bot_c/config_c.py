@@ -66,6 +66,7 @@ class ConfigStrategyC:
     l2_breakout_buffer_pct: float = 0.0002
     l2_retest_buffer_pct: float = 0.0001
     l2_pullback_max_bars: int = 12
+    l2_use_trend_pullback: bool = False
     l2_require_ema_alignment: bool = False
     l2_max_pullback_depth_pct: float = 0.0
 
