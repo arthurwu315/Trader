@@ -187,6 +187,160 @@ def run_adx_backtest(config, data_entry, data_15m) -> list[TradeResult]:
     return trades
 
 
+def run_range_revert_backtest(config, data_entry, data_15m) -> list[TradeResult]:
+    df_3m = data_entry.copy()
+    df_15m = data_15m.copy()
+
+    def ema(series, period):
+        return series.ewm(span=period, adjust=False).mean()
+
+    def atr(df, period):
+        high = df["high"]
+        low = df["low"]
+        close = df["close"]
+        prev_close = close.shift(1)
+        tr = (high - low).to_frame(name="hl")
+        tr["hc"] = (high - prev_close).abs()
+        tr["lc"] = (low - prev_close).abs()
+        return tr.max(axis=1).rolling(window=period, min_periods=period).mean()
+
+    def rsi(series, period):
+        delta = series.diff()
+        gain = delta.where(delta > 0, 0.0).rolling(window=period, min_periods=period).mean()
+        loss = (-delta.where(delta < 0, 0.0)).rolling(window=period, min_periods=period).mean()
+        rs = gain / loss
+        return 100 - (100 / (1 + rs))
+
+    def bbands(series, period, std_mult):
+        sma = series.rolling(window=period, min_periods=period).mean()
+        std = series.rolling(window=period, min_periods=period).std()
+        upper = sma + std_mult * std
+        lower = sma - std_mult * std
+        return lower, sma, upper
+
+    def adx(df, period=14):
+        high = df["high"]
+        low = df["low"]
+        close = df["close"]
+        prev_close = close.shift(1)
+        tr = (high - low).to_frame(name="hl")
+        tr["hc"] = (high - prev_close).abs()
+        tr["lc"] = (low - prev_close).abs()
+        true_range = tr.max(axis=1)
+
+        up_move = high.diff()
+        down_move = -low.diff()
+        plus_dm = up_move.where((up_move > down_move) & (up_move > 0), 0.0)
+        minus_dm = down_move.where((down_move > up_move) & (down_move > 0), 0.0)
+
+        atr_val = true_range.rolling(window=period, min_periods=period).mean()
+        plus_di = 100 * (plus_dm.rolling(window=period, min_periods=period).mean() / atr_val)
+        minus_di = 100 * (minus_dm.rolling(window=period, min_periods=period).mean() / atr_val)
+        dx = (abs(plus_di - minus_di) / (plus_di + minus_di)).replace([float("inf"), -float("inf")], 0.0) * 100
+        return dx.rolling(window=period, min_periods=period).mean()
+
+    df_3m["ema9"] = ema(df_3m["close"], 9)
+    df_3m["ema20"] = ema(df_3m["close"], 20)
+    df_3m["atr"] = atr(df_3m, int(getattr(config, "c_atr_period_3m", 14)))
+
+    rsi_period = int(getattr(config, "c_rsi_period", 14))
+    bb_period = int(getattr(config, "c_bb_period", 20))
+    bb_std = float(getattr(config, "c_bb_std", 2.0))
+
+    df_15m["rsi"] = rsi(df_15m["close"], rsi_period)
+    df_15m["bb_lower"], df_15m["bb_mid"], df_15m["bb_upper"] = bbands(df_15m["close"], bb_period, bb_std)
+    df_15m["adx"] = adx(df_15m, period=int(getattr(config, "c_adx_period", 14)))
+
+    df_15m = df_15m[["timestamp", "rsi", "bb_lower", "bb_upper", "adx"]].sort_values("timestamp")
+    df_3m = df_3m.sort_values("timestamp")
+    df_merged = pd.merge_asof(df_3m, df_15m, on="timestamp", direction="backward")
+
+    trades: list[TradeResult] = []
+    i = 60
+    max_adx = float(getattr(config, "c_range_max_adx", 18.0))
+    rsi_long = float(getattr(config, "c_rsi_long", 30.0))
+    rsi_short = float(getattr(config, "c_rsi_short", 70.0))
+    atr_mult = float(getattr(config, "c_atr_mult", 1.2))
+
+    while i < len(df_merged) - 2:
+        row = df_merged.iloc[i]
+        adx_val = float(row["adx"]) if row["adx"] == row["adx"] else 0.0
+        if adx_val > max_adx:
+            i += 1
+            continue
+
+        rsi_val = float(row["rsi"]) if row["rsi"] == row["rsi"] else 50.0
+        bb_lower = float(row["bb_lower"]) if row["bb_lower"] == row["bb_lower"] else None
+        bb_upper = float(row["bb_upper"]) if row["bb_upper"] == row["bb_upper"] else None
+
+        close = float(row["close"])
+        open_p = float(row["open"])
+        low = float(row["low"])
+        high = float(row["high"])
+        atr_val = float(row["atr"]) if row["atr"] == row["atr"] else 0.0
+
+        side = None
+        if bb_lower is not None and rsi_val <= rsi_long and low <= bb_lower and close > open_p:
+            side = "BUY"
+            sl_price = close - atr_val * atr_mult
+        elif bb_upper is not None and rsi_val >= rsi_short and high >= bb_upper and close < open_p:
+            side = "SELL"
+            sl_price = close + atr_val * atr_mult
+
+        if side is None:
+            i += 1
+            continue
+
+        sl_pct = abs(close - sl_price) / close
+        if sl_pct < config.min_stop_distance_pct:
+            sl_price = close * (1 - config.min_stop_distance_pct) if side == "BUY" else close * (1 + config.min_stop_distance_pct)
+        if sl_pct > config.max_stop_distance_pct:
+            i += 1
+            continue
+
+        round_trip_fee = config.fee_taker * 2
+        slippage = config.slippage_buffer
+        total_cost = round_trip_fee + slippage
+        rr = float(getattr(config, "tp_rr_multiple", 1.2))
+        tp_min_fixed_pct = float(getattr(config, "tp_min_fixed_pct", 0.0045))
+
+        if side == "BUY":
+            r_dist = close - sl_price
+            tp_by_r = close + r_dist * rr
+            fixed_pct = max(tp_min_fixed_pct, total_cost + config.min_tp_after_costs_pct)
+            tp_by_fixed = close * (1 + fixed_pct)
+            tp_price = max(tp_by_r, tp_by_fixed)
+        else:
+            r_dist = sl_price - close
+            tp_by_r = close - r_dist * rr
+            fixed_pct = max(tp_min_fixed_pct, total_cost + config.min_tp_after_costs_pct)
+            tp_by_fixed = close * (1 - fixed_pct)
+            tp_price = min(tp_by_r, tp_by_fixed)
+
+        exit_idx, exit_price, exit_time = simulate_trade(
+            df_3m, i + 1, side, close, sl_price, tp_price
+        )
+        direction = 1 if side == "BUY" else -1
+        gross_return = (exit_price - close) / close * direction * 100
+        costs = (config.fee_taker * 2 + config.slippage_buffer) * 100
+        net_return = gross_return - costs
+
+        trades.append(
+            TradeResult(
+                entry_time=row["timestamp"],
+                exit_time=exit_time,
+                entry_price=close,
+                exit_price=exit_price,
+                side=side,
+                return_pct=net_return,
+                win=net_return > 0,
+            )
+        )
+        i = exit_idx + 1
+
+    return trades
+
+
 def setup_logging():
     logging.basicConfig(
         level=logging.ERROR,
@@ -244,15 +398,14 @@ def main():
     strategy = StrategyCCore(config, md)
 
     trades: list[TradeResult] = []
-    i = 50
-    while i < len(data_entry) - 2:
-        current_time = data_entry["timestamp"].iloc[i]
-        md.set_time(current_time)
+    mode = str(getattr(config, "c_strategy_mode", "")).upper()
+    if mode not in {"ADX_TREND", "RANGE_REVERT"}:
+        i = 50
+        while i < len(data_entry) - 2:
+            current_time = data_entry["timestamp"].iloc[i]
+            md.set_time(current_time)
 
-        signal = None
-        if str(getattr(config, "c_strategy_mode", "")).upper() == "ADX_TREND":
-            break
-        else:
+            signal = None
             l1_pass, _, l1_debug = strategy.l1_gate.check_long_environment(md)
             if l1_pass:
                 has_signal, _, signal = strategy.l2_gate.check_entry_pattern(
@@ -270,61 +423,63 @@ def main():
                         bar_index=i
                     )
 
-        if signal:
-            entry_price = signal.entry_price
-            stop_price = signal.stop_loss
-            tp_price = signal.tp1_price
-            side = "BUY" if signal.signal_type == "LONG" else "SELL"
+            if signal:
+                entry_price = signal.entry_price
+                stop_price = signal.stop_loss
+                tp_price = signal.tp1_price
+                side = "BUY" if signal.signal_type == "LONG" else "SELL"
 
-            if getattr(config, "enable_ema_exit", False):
-                exit_idx, exit_price, gross_return, exit_time = simulate_trade_with_ema_exit(
-                    data_entry,
-                    i + 1,
-                    side,
-                    entry_price,
-                    stop_price,
-                    tp_price,
-                    ema_period=int(getattr(config, "ema_exit_period", 20)),
+                if getattr(config, "enable_ema_exit", False):
+                    exit_idx, exit_price, gross_return, exit_time = simulate_trade_with_ema_exit(
+                        data_entry,
+                        i + 1,
+                        side,
+                        entry_price,
+                        stop_price,
+                        tp_price,
+                        ema_period=int(getattr(config, "ema_exit_period", 20)),
+                    )
+                elif getattr(config, "enable_partial_tp", True) and getattr(signal, "tp2_price", None):
+                    exit_idx, exit_price, gross_return, exit_time = simulate_trade_two_stage(
+                        data_entry,
+                        i + 1,
+                        side,
+                        entry_price,
+                        stop_price,
+                        tp_price,
+                        signal.tp2_price,
+                        partial_ratio=float(getattr(config, "partial_tp_ratio", 0.5)),
+                    )
+                else:
+                    exit_idx, exit_price, exit_time = simulate_trade(
+                        data_entry, i + 1, side, entry_price, stop_price, tp_price
+                    )
+                    direction = 1 if side == "BUY" else -1
+                    gross_return = (exit_price - entry_price) / entry_price * direction * 100
+                costs = (config.fee_taker * 2 + config.slippage_buffer) * 100
+                net_return = gross_return - costs
+
+                trades.append(
+                    TradeResult(
+                        entry_time=current_time,
+                        exit_time=exit_time,
+                        entry_price=entry_price,
+                        exit_price=exit_price,
+                        side=side,
+                        return_pct=net_return,
+                        win=net_return > 0,
+                    )
                 )
-            elif getattr(config, "enable_partial_tp", True) and getattr(signal, "tp2_price", None):
-                exit_idx, exit_price, gross_return, exit_time = simulate_trade_two_stage(
-                    data_entry,
-                    i + 1,
-                    side,
-                    entry_price,
-                    stop_price,
-                    tp_price,
-                    signal.tp2_price,
-                    partial_ratio=float(getattr(config, "partial_tp_ratio", 0.5)),
-                )
-            else:
-                exit_idx, exit_price, exit_time = simulate_trade(
-                    data_entry, i + 1, side, entry_price, stop_price, tp_price
-                )
-                direction = 1 if side == "BUY" else -1
-                gross_return = (exit_price - entry_price) / entry_price * direction * 100
-            costs = (config.fee_taker * 2 + config.slippage_buffer) * 100
-            net_return = gross_return - costs
 
-            trades.append(
-                TradeResult(
-                    entry_time=current_time,
-                    exit_time=exit_time,
-                    entry_price=entry_price,
-                    exit_price=exit_price,
-                    side=side,
-                    return_pct=net_return,
-                    win=net_return > 0,
-                )
-            )
+                i = exit_idx + 1
+                continue
 
-            i = exit_idx + 1
-            continue
+            i += 1
 
-        i += 1
-
-    if str(getattr(config, "c_strategy_mode", "")).upper() == "ADX_TREND":
+    if mode == "ADX_TREND":
         trades = run_adx_backtest(config, data_entry, data_15m)
+    elif mode == "RANGE_REVERT":
+        trades = run_range_revert_backtest(config, data_entry, data_15m)
 
     summary = summarize_results(trades)
     trades_per_day = summary["trades"] / max(days, 1)

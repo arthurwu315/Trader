@@ -1434,6 +1434,21 @@ class TrendCoreMixin:
         adx = dx.rolling(window=period, min_periods=period).mean()
         return adx, atr
 
+    def _calculate_rsi(self, series, period: int = 14):
+        delta = series.diff()
+        gain = delta.where(delta > 0, 0.0).rolling(window=period, min_periods=period).mean()
+        loss = (-delta.where(delta < 0, 0.0)).rolling(window=period, min_periods=period).mean()
+        rs = gain / loss
+        rsi = 100 - (100 / (1 + rs))
+        return rsi
+
+    def _calculate_bbands(self, series, period: int = 20, std_mult: float = 2.0):
+        sma = series.rolling(window=period, min_periods=period).mean()
+        std = series.rolling(window=period, min_periods=period).std()
+        upper = sma + std_mult * std
+        lower = sma - std_mult * std
+        return lower, sma, upper
+
     def _check_adx_trend_signal(self) -> Optional[StrategyCSignal]:
         entry_interval = getattr(self.config, "entry_interval", "3m")
         df_3m = self.market_data.get_klines_df(self.config.symbol, entry_interval, limit=200)
@@ -1583,6 +1598,69 @@ class TrendCoreMixin:
             breakout_level=None,
             swing_low=None,
         )
+
+    def _check_range_revert_signal(self) -> Optional[StrategyCSignal]:
+        entry_interval = getattr(self.config, "entry_interval", "3m")
+        df_3m = self.market_data.get_klines_df(self.config.symbol, entry_interval, limit=200)
+        df_15m = self.market_data.get_klines_df(self.config.symbol, "15m", limit=200)
+        if df_3m is None or df_15m is None or len(df_3m) < 60 or len(df_15m) < 60:
+            return None
+
+        adx_period = int(getattr(self.config, "c_adx_period", 14))
+        adx, _ = self._calculate_adx(df_15m, period=adx_period)
+        adx_current = float(adx.iloc[-1]) if not adx.dropna().empty else 0.0
+        max_adx = float(getattr(self.config, "c_range_max_adx", 20.0))
+        if adx_current > max_adx:
+            return None
+
+        rsi_period = int(getattr(self.config, "c_rsi_period", 14))
+        rsi_long = float(getattr(self.config, "c_rsi_long", 30.0))
+        rsi_short = float(getattr(self.config, "c_rsi_short", 70.0))
+        bb_period = int(getattr(self.config, "c_bb_period", 20))
+        bb_std = float(getattr(self.config, "c_bb_std", 2.0))
+
+        rsi_15m = self._calculate_rsi(df_15m["close"], rsi_period)
+        rsi_val = float(rsi_15m.iloc[-1]) if not rsi_15m.dropna().empty else 50.0
+        lower, mid, upper = self._calculate_bbands(df_15m["close"], bb_period, bb_std)
+        lower_val = float(lower.iloc[-1]) if not lower.dropna().empty else None
+        upper_val = float(upper.iloc[-1]) if not upper.dropna().empty else None
+
+        current_close = float(df_3m["close"].iloc[-1])
+        current_open = float(df_3m["open"].iloc[-1])
+        current_low = float(df_3m["low"].iloc[-1])
+        current_high = float(df_3m["high"].iloc[-1])
+
+        atr_period_3m = int(getattr(self.config, "c_atr_period_3m", 14))
+        atr_mult = float(getattr(self.config, "c_atr_mult", 1.2))
+        atr_3m = self.l1_gate._calculate_atr(df_3m, atr_period_3m)
+        atr_current = float(atr_3m.iloc[-1]) if not atr_3m.dropna().empty else 0.0
+
+        ema9 = float(df_3m["close"].ewm(span=9, adjust=False).mean().iloc[-1])
+        ema20 = float(df_3m["close"].ewm(span=20, adjust=False).mean().iloc[-1])
+
+        if lower_val is not None and rsi_val <= rsi_long and current_low <= lower_val:
+            if current_close > current_open:
+                sl_price = current_close - atr_current * atr_mult
+                return self._generate_signal_adx(
+                    signal_type="LONG",
+                    entry_price=current_close,
+                    sl_price=sl_price,
+                    ema9=ema9,
+                    ema20=ema20,
+                )
+
+        if upper_val is not None and rsi_val >= rsi_short and current_high >= upper_val:
+            if current_close < current_open:
+                sl_price = current_close + atr_current * atr_mult
+                return self._generate_signal_adx(
+                    signal_type="SHORT",
+                    entry_price=current_close,
+                    sl_price=sl_price,
+                    ema9=ema9,
+                    ema20=ema20,
+                )
+
+        return None
 
     def _detect_breakout(self, df) -> Tuple[bool, Optional[Dict]]:
         # ✅ 不包含當前K
@@ -2109,6 +2187,12 @@ class StrategyCCore(TrendCoreMixin):
             if not l0_pass:
                 logger.info(f"🚫 {l0_reason}")
                 return None
+
+            mode = str(getattr(self.config, "c_strategy_mode", "")).upper()
+            if mode == "ADX_TREND":
+                return self._check_adx_trend_signal()
+            if mode == "RANGE_REVERT":
+                return self._check_range_revert_signal()
 
             # === Strategy C: New core mode (ADX trend breakout) ===
             if str(getattr(self.config, "c_strategy_mode", "")).upper() == "ADX_TREND":

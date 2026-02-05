@@ -28,8 +28,8 @@ class ConfigStrategyC:
     enable_long: bool = True
     enable_short: bool = True
     c_use_macro_regime: bool = False
-    # 可選：ADX_TREND / DEFAULT
-    c_strategy_mode: str = "DEFAULT"
+    # 可選：ADX_TREND / RANGE_REVERT / DEFAULT
+    c_strategy_mode: str = "RANGE_REVERT"
     
     # ==================== 風險與槓桿（提高單筆報酬潛力，維持正期望） ====================
     risk_per_trade_pct: float = 0.0025  # 0.25%
@@ -81,6 +81,12 @@ class ConfigStrategyC:
     c_breakout_volume_mult: float = 1.2
     c_atr_period_3m: int = 14
     c_atr_mult: float = 1.6
+    c_range_max_adx: float = 18.0
+    c_rsi_period: int = 14
+    c_rsi_long: float = 30.0
+    c_rsi_short: float = 70.0
+    c_bb_period: int = 20
+    c_bb_std: float = 2.0
 
     # 與 strategy_c_core L2Gate 對齊（與 B 同參數名）
     structure_lookback_bars: int = 20
