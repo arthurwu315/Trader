@@ -1409,6 +1409,181 @@ class L2Gate:
             swing_low=None,
         )
 
+
+class TrendCoreMixin:
+    def _calculate_adx(self, df, period: int = 14):
+        high = df["high"].astype(float)
+        low = df["low"].astype(float)
+        close = df["close"].astype(float)
+        prev_close = close.shift(1)
+
+        tr = (high - low).to_frame(name="hl")
+        tr["hc"] = (high - prev_close).abs()
+        tr["lc"] = (low - prev_close).abs()
+        true_range = tr.max(axis=1)
+
+        up_move = high.diff()
+        down_move = -low.diff()
+        plus_dm = up_move.where((up_move > down_move) & (up_move > 0), 0.0)
+        minus_dm = down_move.where((down_move > up_move) & (down_move > 0), 0.0)
+
+        atr = true_range.rolling(window=period, min_periods=period).mean()
+        plus_di = 100 * (plus_dm.rolling(window=period, min_periods=period).mean() / atr)
+        minus_di = 100 * (minus_dm.rolling(window=period, min_periods=period).mean() / atr)
+        dx = (abs(plus_di - minus_di) / (plus_di + minus_di)).replace([np.inf, -np.inf], np.nan) * 100
+        adx = dx.rolling(window=period, min_periods=period).mean()
+        return adx, atr
+
+    def _check_adx_trend_signal(self) -> Optional[StrategyCSignal]:
+        entry_interval = getattr(self.config, "entry_interval", "3m")
+        df_3m = self.market_data.get_klines_df(self.config.symbol, entry_interval, limit=200)
+        df_15m = self.market_data.get_klines_df(self.config.symbol, "15m", limit=200)
+        if df_3m is None or df_15m is None or len(df_3m) < 60 or len(df_15m) < 60:
+            return None
+
+        ema20_15m = self.l1_gate._calculate_ema(df_15m["close"], 20)
+        ema50_15m = self.l1_gate._calculate_ema(df_15m["close"], 50)
+        ema20_3m = self.l1_gate._calculate_ema(df_3m["close"], 20)
+        ema9_3m = self.l1_gate._calculate_ema(df_3m["close"], 9)
+
+        adx_period = int(getattr(self.config, "c_adx_period", 14))
+        adx, atr_15m = self._calculate_adx(df_15m, period=adx_period)
+        adx_current = float(adx.iloc[-1]) if not adx.dropna().empty else 0.0
+        adx_min = float(getattr(self.config, "c_adx_min", 20.0))
+        if adx_current < adx_min:
+            return None
+
+        price_15m = float(df_15m["close"].iloc[-1])
+        ema20_15m_cur = float(ema20_15m.iloc[-1])
+        ema50_15m_cur = float(ema50_15m.iloc[-1])
+
+        trend_long = ema20_15m_cur > ema50_15m_cur and price_15m >= ema20_15m_cur
+        trend_short = ema20_15m_cur < ema50_15m_cur and price_15m <= ema20_15m_cur
+
+        current_close = float(df_3m["close"].iloc[-1])
+        current_open = float(df_3m["open"].iloc[-1])
+        current_high = float(df_3m["high"].iloc[-1])
+        current_low = float(df_3m["low"].iloc[-1])
+
+        lookback = int(getattr(self.config, "c_breakout_lookback", 20))
+        buffer_pct = float(getattr(self.config, "c_breakout_buffer_pct", 0.0002))
+        vol_lookback = int(getattr(self.config, "c_breakout_volume_lookback", 20))
+        vol_mult = float(getattr(self.config, "c_breakout_volume_mult", 1.2))
+
+        highs_before = df_3m["high"].iloc[-lookback - 1:-1]
+        lows_before = df_3m["low"].iloc[-lookback - 1:-1]
+        breakout_level = float(highs_before.max())
+        breakdown_level = float(lows_before.min())
+
+        vol_series = df_3m["volume"].iloc[-vol_lookback - 1:-1]
+        vol_sma = float(vol_series.mean()) if len(vol_series) > 0 else 0.0
+        current_vol = float(df_3m["volume"].iloc[-1])
+        vol_ok = current_vol >= vol_sma * vol_mult if vol_sma > 0 else True
+
+        ema9_cur = float(ema9_3m.iloc[-1])
+        ema20_cur = float(ema20_3m.iloc[-1])
+
+        # ATR on 3m for stop distance
+        atr_period_3m = int(getattr(self.config, "c_atr_period_3m", 14))
+        atr_3m = self.l1_gate._calculate_atr(df_3m, atr_period_3m)
+        atr_current = float(atr_3m.iloc[-1]) if not atr_3m.dropna().empty else 0.0
+        atr_mult = float(getattr(self.config, "c_atr_mult", 1.5))
+
+        if trend_long:
+            if current_close > breakout_level * (1 + buffer_pct) and ema9_cur > ema20_cur and vol_ok:
+                sl_price = current_close - atr_current * atr_mult
+                return self._generate_signal_adx(
+                    signal_type="LONG",
+                    entry_price=current_close,
+                    sl_price=sl_price,
+                    ema9=ema9_cur,
+                    ema20=ema20_cur,
+                )
+
+        if trend_short:
+            if current_close < breakdown_level * (1 - buffer_pct) and ema9_cur < ema20_cur and vol_ok:
+                sl_price = current_close + atr_current * atr_mult
+                return self._generate_signal_adx(
+                    signal_type="SHORT",
+                    entry_price=current_close,
+                    sl_price=sl_price,
+                    ema9=ema9_cur,
+                    ema20=ema20_cur,
+                )
+
+        return None
+
+    def _generate_signal_adx(
+        self,
+        signal_type: str,
+        entry_price: float,
+        sl_price: float,
+        ema9: float,
+        ema20: float,
+    ) -> Optional[StrategyCSignal]:
+        sl_pct = abs(entry_price - sl_price) / entry_price
+        if sl_pct < self.config.min_stop_distance_pct:
+            if signal_type == "LONG":
+                sl_price = entry_price * (1 - self.config.min_stop_distance_pct)
+            else:
+                sl_price = entry_price * (1 + self.config.min_stop_distance_pct)
+            sl_pct = self.config.min_stop_distance_pct
+        if sl_pct > self.config.max_stop_distance_pct:
+            return None
+
+        round_trip_fee = self.config.fee_taker * 2
+        slippage = self.config.slippage_buffer
+        total_cost = round_trip_fee + slippage
+
+        rr = float(getattr(self.config, "tp_rr_multiple", 2.0))
+        tp_min_fixed_pct = float(getattr(self.config, "tp_min_fixed_pct", 0.008))
+
+        if signal_type == "LONG":
+            r_dist = entry_price - sl_price
+            tp_by_r = entry_price + r_dist * rr
+            min_required_tp1_pct = total_cost + self.config.min_tp_after_costs_pct
+            fixed_pct = max(tp_min_fixed_pct, min_required_tp1_pct)
+            tp_by_fixed = entry_price * (1 + fixed_pct)
+            tp1_price = max(tp_by_r, tp_by_fixed)
+            tp1_pct = (tp1_price - entry_price) / entry_price
+            tp1_net = tp1_pct - total_cost
+            if tp1_net < self.config.min_tp_after_costs_pct:
+                return None
+            rr2 = float(getattr(self.config, "tp2_rr_multiple", 2.0))
+            tp2_price = entry_price + r_dist * rr2
+        else:
+            r_dist = sl_price - entry_price
+            tp_by_r = entry_price - r_dist * rr
+            min_required_tp1_pct = total_cost + self.config.min_tp_after_costs_pct
+            fixed_pct = max(tp_min_fixed_pct, min_required_tp1_pct)
+            tp_by_fixed = entry_price * (1 - fixed_pct)
+            tp1_price = min(tp_by_r, tp_by_fixed)
+            tp1_pct = (entry_price - tp1_price) / entry_price
+            tp1_net = tp1_pct - total_cost
+            if tp1_net < self.config.min_tp_after_costs_pct:
+                return None
+            rr2 = float(getattr(self.config, "tp2_rr_multiple", 2.0))
+            tp2_price = entry_price - r_dist * rr2
+
+        return StrategyCSignal(
+            signal_type=signal_type,
+            pattern="ADX_TREND",
+            entry_price=entry_price,
+            stop_loss=sl_price,
+            tp1_price=tp1_price,
+            tp2_price=tp2_price,
+            stop_distance_pct=sl_pct,
+            expected_tp1_pct=tp1_pct,
+            confidence=0.70,
+            reason="ADX trend breakout",
+            timestamp=datetime.now(),
+            ema20_15m=0.0,
+            ema9_3m=ema9,
+            ema20_3m=ema20,
+            breakout_level=None,
+            swing_low=None,
+        )
+
     def _detect_breakout(self, df) -> Tuple[bool, Optional[Dict]]:
         # ✅ 不包含當前K
         highs_before_current = df['high'].iloc[-self.breakout_lookback - 1:-1]
@@ -1874,7 +2049,7 @@ class L2Gate:
 
 # ==================== 主策略類 ====================
 
-class StrategyCCore:
+class StrategyCCore(TrendCoreMixin):
     """策略B核心 - V5.2"""
 
     def __init__(self, config, market_data):
@@ -1934,6 +2109,10 @@ class StrategyCCore:
             if not l0_pass:
                 logger.info(f"🚫 {l0_reason}")
                 return None
+
+            # === Strategy C: New core mode (ADX trend breakout) ===
+            if str(getattr(self.config, "c_strategy_mode", "")).upper() == "ADX_TREND":
+                return self._check_adx_trend_signal()
 
             l1_pass = False
             l1_reason = "LONG_DISABLED"
