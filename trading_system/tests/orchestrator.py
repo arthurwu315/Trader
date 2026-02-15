@@ -33,7 +33,14 @@ FEE_BPS = 9.0
 SLIPPAGE_BPS = 5.0
 BACKTEST_START = "2022-01-01"
 BACKTEST_END = "2023-12-31"
+USE_2024_OOS = os.environ.get("USE_2024_OOS", "0") == "1"
+if USE_2024_OOS:
+    BACKTEST_START = "2024-01-01"
+    BACKTEST_END = datetime.now(timezone.utc).strftime("%Y-%m-%d")
 MAX_RECURSION = 3
+if USE_2024_OOS:
+    DIRECTION_VALS = ["long"]
+    MIN_SCORE_VALS = [1, 2]
 MIN_STEP_Z = 0.1
 SLEEP_BETWEEN_BATCHES = 3
 SLEEP_WHEN_LOAD_HIGH = 8
@@ -58,9 +65,9 @@ BASE_SL_ATR_MAX = 2.0
 STEP_SL_ATR = 0.5  # 1.0, 1.5, 2.0
 BASE_SL_VALS = [1.0, 1.5, 2.0]
 
-# 重心轉移至 Short：只搜尋做空與多空並行
-DIRECTION_VALS = ["short", "both"]
-# 快速止盈：止盈 ATR 倍數 [1.5, 2.5, 3.5]，壓低回撤、落袋為安
+# 牛熊分治：short / both / regime（regime 時價格 > EMA200 用較低 min_score 做多）
+DIRECTION_VALS = ["short", "both", "regime"]
+# 快速止盈：止盈 ATR 倍數 [1.5, 2.5, 3.5]
 TP_ATR_VALS = [1.5, 2.5, 3.5]
 
 # 固定
@@ -149,15 +156,27 @@ def params_to_variant(
     direction: str,
 ) -> Tuple[Dict[str, float], Any]:
     from bots.bot_c.strategy_bnb import ExitRules
-    entry_thresholds = {
-        "funding_z_threshold": funding_z,
-        "rsi_z_threshold": rsi_z,
-        "min_score": min_score,
-    }
-    if direction == "long":
-        entry_thresholds["price_breakout_long"] = 1.0
+    if direction == "regime":
+        entry_thresholds = {
+            "funding_z_long": funding_z,
+            "rsi_z_long": rsi_z,
+            "min_score_long": 1,
+            "funding_z_short": funding_z,
+            "rsi_z_short": rsi_z,
+            "min_score_short": 2,
+            "price_breakout_long": 1.0,
+            "price_breakout_short": 1.0,
+        }
     else:
-        entry_thresholds["price_breakout_short"] = 1.0
+        entry_thresholds = {
+            "funding_z_threshold": funding_z,
+            "rsi_z_threshold": rsi_z,
+            "min_score": min_score,
+        }
+        if direction == "long":
+            entry_thresholds["price_breakout_long"] = 1.0
+        else:
+            entry_thresholds["price_breakout_short"] = 1.0
     exit_rules = ExitRules(
         tp_r_mult=FIXED_TP_R_MULT,
         tp_atr_mult=tp_atr_mult,
@@ -180,6 +199,32 @@ def run_single(
     direction: str,
 ) -> Dict[str, Any]:
     from bots.bot_c.strategy_bnb import StrategyBNB
+    if direction == "regime":
+        entry_th, exit_rules = params_to_variant(funding_z, rsi_z, min_score, base_sl_atr, tp_atr_mult, direction)
+        strat = StrategyBNB(
+            entry_thresholds=entry_th,
+            exit_rules=exit_rules,
+            position_size=POSITION_SIZE,
+            direction="regime",
+            min_factors_required=1,
+        )
+        res = engine.run(strat, data, fee_bps=FEE_BPS, slippage_bps=SLIPPAGE_BPS)
+        total_return_pct = res.get("total_return_pct") or 0
+        max_dd = res.get("max_drawdown_pct") or 0
+        return {
+            "funding_z_threshold": funding_z,
+            "rsi_z_threshold": rsi_z,
+            "min_score": min_score,
+            "base_sl_atr_mult": base_sl_atr,
+            "tp_atr_mult": tp_atr_mult,
+            "direction": direction,
+            "result": res,
+            "total_return_pct": total_return_pct,
+            "weekly_return_pct": res.get("weekly_return_pct") or 0,
+            "max_drawdown_pct": max_dd,
+            "trades_count": res.get("trades_count", 0),
+            "profitable": res.get("profitable_after_fees", False),
+        }
     if direction == "both":
         # 多空並行：各跑一次，合併報酬與取最大回撤
         entry_th_long, exit_rules = params_to_variant(funding_z, rsi_z, min_score, base_sl_atr, tp_atr_mult, "long")
@@ -301,9 +346,17 @@ def write_best_strategy_py(
     ratio: float,
 ):
     BOT_C.mkdir(parents=True, exist_ok=True)
-    # best_strategy.py 僅能輸出一種方向；"both" 時以 short 為主
     direction_file = "short" if direction == "both" else direction
-    if direction_file == "long":
+    if direction == "regime":
+        entry_lines = f"""    "funding_z_long": {funding_z},
+    "rsi_z_long": {rsi_z},
+    "min_score_long": 1,
+    "funding_z_short": {funding_z},
+    "rsi_z_short": {rsi_z},
+    "min_score_short": 2,
+    "price_breakout_long": 1.0,
+    "price_breakout_short": 1.0,"""
+    elif direction_file == "long":
         entry_lines = f"""    "funding_z_threshold": {funding_z},
     "rsi_z_threshold": {rsi_z},
     "min_score": {min_score},
@@ -314,7 +367,7 @@ def write_best_strategy_py(
     "min_score": {min_score},
     "price_breakout_short": 1.0,"""
     content = f'''"""
-BNB/USDT 因子投票 + EMA200 + 快速止盈 tp_atr={tp_atr_mult}（優化方向={direction!r}）
+BNB/USDT 牛熊分治 + EMA200 + 快速止盈 tp_atr={tp_atr_mult}（方向={direction!r}）
 funding_z={funding_z}, rsi_z={rsi_z}, min_score={min_score}, base_sl={base_sl_atr}, Calmar={ratio:.4f}
 """
 from __future__ import annotations
@@ -359,7 +412,10 @@ def main():
     optimization_path_file = LOG_DIR / f"optimization_path_{report_ts}.json"
     final_report_file = LOG_DIR / f"final_report_{report_ts}.json"
 
-    print("遞迴優化引擎 (Calmar 優化 + EMA200 趨勢 + 動態止損): 載入資料...")
+    if USE_2024_OOS:
+        print("遞迴優化引擎 [2024 牛市專項] 僅優化做多、2024-01-01 至今資料...")
+    else:
+        print("遞迴優化引擎 (Calmar 優化 + EMA200 趨勢 + 動態止損): 載入資料...")
     try:
         data = load_data()
     except Exception as e:

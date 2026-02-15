@@ -125,14 +125,22 @@ class StrategyBNB:
         self.exit_rules = exit_rules
         self.position_size = position_size
         self.direction = direction.lower()
-        self._use_vote = "min_score" in entry_thresholds
+        self._use_regime = (
+            (direction == "regime")
+            or ("funding_z_long" in entry_thresholds and "funding_z_short" in entry_thresholds)
+        )
+        self._use_vote = "min_score" in entry_thresholds or self._use_regime
         self._min_score = int(entry_thresholds.get("min_score", 2))
+        self._min_score_bull = int(entry_thresholds.get("min_score_long", entry_thresholds.get("min_score_bull", 1)))
+        self._min_score_bear = int(entry_thresholds.get("min_score_short", entry_thresholds.get("min_score_bear", 2)))
         if min_factors_required is not None:
             self.min_factors_required = min_factors_required
+        elif self._use_regime:
+            self.min_factors_required = min(self._min_score_bull, self._min_score_bear)
         elif self._use_vote:
             self.min_factors_required = self._min_score
         else:
-            self.min_factors_required = len([k for k in entry_thresholds if k != "min_score"])
+            self.min_factors_required = len([k for k in entry_thresholds if k not in ("min_score", "min_score_long", "min_score_short", "min_score_bull", "min_score_bear")])
 
     def _vote_score(self, row: pd.Series) -> int:
         """三因子投票：Funding Z、RSI Z、Price Breakout，各達標得 1 分。"""
@@ -163,6 +171,41 @@ class StrategyBNB:
                 score += 1
         return score
 
+    def _vote_score_regime(self, row: pd.Series) -> tuple:
+        """牛熊分治：依 close vs ema_200 回傳 (direction, score, required)。"""
+        close = float(row["close"])
+        ema200 = row.get("ema_200")
+        if pd.isna(ema200):
+            ema200 = close
+        else:
+            ema200 = float(ema200)
+        fz_long = self.entry_thresholds.get("funding_z_long", 1.0)
+        rz_long = self.entry_thresholds.get("rsi_z_long", 1.0)
+        fz_short = self.entry_thresholds.get("funding_z_short", 1.75)
+        rz_short = self.entry_thresholds.get("rsi_z_short", 1.75)
+        if close > ema200:
+            score = 0
+            z = row.get("funding_z_score", 0)
+            if not pd.isna(z) and float(z) <= -fz_long:
+                score += 1
+            z = row.get("rsi_z_score", 0)
+            if not pd.isna(z) and float(z) <= -rz_long:
+                score += 1
+            if row.get("price_breakout_long", 0) >= 1:
+                score += 1
+            return ("long", score, self._min_score_bull)
+        else:
+            score = 0
+            z = row.get("funding_z_score", 0)
+            if not pd.isna(z) and float(z) >= fz_short:
+                score += 1
+            z = row.get("rsi_z_score", 0)
+            if not pd.isna(z) and float(z) >= rz_short:
+                score += 1
+            if row.get("price_breakout_short", 0) >= 1:
+                score += 1
+            return ("short", score, self._min_score_bear)
+
     def get_score_distribution(self, market_data: pd.DataFrame) -> Dict[int, int]:
         """回傳各得分出現次數（用於診斷 0 交易）。key=1,2,3 為得分，value=該得分的 K 線數。"""
         df = market_data.copy()
@@ -188,14 +231,20 @@ class StrategyBNB:
         tp_price = pd.Series(np.nan, index=df.index)
 
         use_vote = self._use_vote
+        use_regime = self._use_regime
         min_score = self._min_score
 
         for i in range(1, n):
             row = df.iloc[i]
             score = 0
             required = self.min_factors_required
+            bar_direction = self.direction
 
-            if use_vote:
+            if use_regime:
+                bar_direction, score, required = self._vote_score_regime(row)
+                if score < required:
+                    continue
+            elif use_vote:
                 score = self._vote_score(row)
                 if score < min_score:
                     continue
@@ -266,15 +315,16 @@ class StrategyBNB:
                 if score < required:
                     continue
 
-            # 趨勢過濾：僅在價格 > EMA200 做多、< EMA200 做空
+            # 趨勢過濾：非 regime 時僅在價格 > EMA200 做多、< EMA200 做空
             close_val = float(row["close"])
-            ema200 = row.get("ema_200")
-            if pd.notna(ema200):
-                ema200 = float(ema200)
-                if self.direction == "long" and close_val <= ema200:
-                    continue
-                if self.direction == "short" and close_val >= ema200:
-                    continue
+            if not use_regime:
+                ema200 = row.get("ema_200")
+                if pd.notna(ema200):
+                    ema200 = float(ema200)
+                    if self.direction == "long" and close_val <= ema200:
+                        continue
+                    if self.direction == "short" and close_val >= ema200:
+                        continue
 
             close = close_val
             atr = float(row.get("atr", 0.0))
@@ -285,7 +335,7 @@ class StrategyBNB:
 
             er = self.exit_rules
             tp_atr = getattr(er, "tp_atr_mult", None)
-            if self.direction == "long":
+            if bar_direction == "long":
                 sl = close - er.sl_atr_mult * atr
                 r_dist = close - sl
                 if tp_atr is not None:
