@@ -1,8 +1,9 @@
 """
 BNB/USDT 實盤接入檔 - 牛熊分治 (Regime-Specific)
 - 進場邏輯：三因子投票 (Funding Z, RSI Z, Price Breakout) + EMA200 趨勢
-- 牛熊分治：EMA200 之上用 LONG_Z_THRESH（寬鬆做多），之下用 SHORT_Z_THRESH（嚴謹做空）
+- 牛熊分治：EMA200 之上用 LONG_Z（寬鬆做多），之下用 SHORT 門檻（嚴謹做空）
 - 風控：2% 硬止損、快速止盈、可選追蹤止盈
+- 當前部署：Calmar 13.9 優化 Short（Funding Z=0.62, RSI Z=2.0, SL ATR=2.0, TP ATR=2.5）
 """
 from __future__ import annotations
 
@@ -10,22 +11,24 @@ from dataclasses import dataclass
 from typing import Any, Dict, Optional
 
 # 牛熊分治 Z-Score 門檻
-LONG_Z_THRESH = 1.0   # 牛市（價格 > EMA200）：做多門檻較寬鬆
-SHORT_Z_THRESH = 1.75 # 熊市（價格 < EMA200）：做空門檻較嚴謹
+LONG_Z_THRESH = 1.0
 LONG_MIN_SCORE = 1
+# Short 部署參數（Ratio 13.9 優化結果）
+SHORT_FUNDING_Z = 0.62
+SHORT_RSI_Z = 2.0
 SHORT_MIN_SCORE = 2
 
-# 與 best_strategy 同步的其餘參數
+# 與 best_strategy / 優化報告同步
 DEPLOY_PARAMS = {
     "funding_z_long": LONG_Z_THRESH,
     "rsi_z_long": LONG_Z_THRESH,
     "min_score_long": LONG_MIN_SCORE,
-    "funding_z_short": SHORT_Z_THRESH,
-    "rsi_z_short": SHORT_Z_THRESH,
+    "funding_z_short": SHORT_FUNDING_Z,
+    "rsi_z_short": SHORT_RSI_Z,
     "min_score_short": SHORT_MIN_SCORE,
     "price_breakout_long": 1.0,
     "price_breakout_short": 1.0,
-    "sl_atr_mult": 1.5,
+    "sl_atr_mult": 2.0,
     "tp_atr_mult": 2.5,
     "trailing_stop_atr_mult": None,
 }
@@ -64,16 +67,20 @@ def _vote_score_long(row: Dict[str, Any], z_thresh: float) -> int:
     return score
 
 
-def _vote_score_short(row: Dict[str, Any], z_thresh: float) -> int:
-    """做空三因子：Funding Z >= z_thresh, RSI Z >= z_thresh, Price Breakout Short."""
+def _vote_score_short(
+    row: Dict[str, Any],
+    funding_z_thresh: float,
+    rsi_z_thresh: float,
+) -> int:
+    """做空三因子：Funding Z >= funding_z_thresh, RSI Z >= rsi_z_thresh, Price Breakout Short."""
     score = 0
     z_f = row.get("funding_z_score", 0)
     if z_f is not None and not (isinstance(z_f, float) and (z_f != z_f)):
-        if float(z_f) >= z_thresh:
+        if float(z_f) >= funding_z_thresh:
             score += 1
     z_r = row.get("rsi_z_score", 0)
     if z_r is not None and not (isinstance(z_r, float) and (z_r != z_r)):
-        if float(z_r) >= z_thresh:
+        if float(z_r) >= rsi_z_thresh:
             score += 1
     if row.get("price_breakout_short", 0) >= 1:
         score += 1
@@ -121,9 +128,10 @@ def get_signal_from_row(row: Dict[str, Any], params: Optional[Dict[str, Any]] = 
         )
     else:
         regime = "bear"
-        z_thresh = p.get("funding_z_short", SHORT_Z_THRESH)
+        fz = p.get("funding_z_short", SHORT_FUNDING_Z)
+        rz = p.get("rsi_z_short", SHORT_RSI_Z)
         min_score = int(p.get("min_score_short", SHORT_MIN_SCORE))
-        score = _vote_score_short(row, z_thresh)
+        score = _vote_score_short(row, fz, rz)
         if score < min_score:
             return None
         sl_atr = p.get("sl_atr_mult", 1.5)
@@ -148,7 +156,8 @@ def get_deploy_params() -> Dict[str, Any]:
     return {
         **DEPLOY_PARAMS,
         "long_z_thresh": LONG_Z_THRESH,
-        "short_z_thresh": SHORT_Z_THRESH,
+        "short_funding_z": SHORT_FUNDING_Z,
+        "short_rsi_z": SHORT_RSI_Z,
         "hard_stop_position_pct": HARD_STOP_POSITION_PCT,
         "position_size": POSITION_SIZE,
     }
@@ -186,8 +195,9 @@ def apply_trailing_tp(
 
 
 if __name__ == "__main__":
-    print("deploy_ready: 牛熊分治門檻已載入")
+    print("deploy_ready: 牛熊分治門檻已載入 (Short: Funding Z=0.62, RSI Z=2.0, SL ATR=2.0, TP ATR=2.5)")
     print("  LONG_Z_THRESH (牛市做多):", LONG_Z_THRESH)
-    print("  SHORT_Z_THRESH (熊市做空):", SHORT_Z_THRESH)
+    print("  SHORT_FUNDING_Z / SHORT_RSI_Z (熊市做空):", SHORT_FUNDING_Z, SHORT_RSI_Z)
+    print("  EMA200 過濾：僅在價格 < EMA200 時允許做空，防止狂暴牛市逆勢空")
     print("  HARD_STOP_POSITION_PCT:", HARD_STOP_POSITION_PCT)
     print("  DEPLOY_PARAMS:", get_deploy_params())
