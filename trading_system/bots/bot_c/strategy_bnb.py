@@ -79,6 +79,9 @@ def add_factor_columns(df: pd.DataFrame) -> pd.DataFrame:
     out["macd_above_signal"] = (out["macd_line"] > out["macd_signal"]).astype(int)
     out["macd_below_signal"] = (out["macd_line"] < out["macd_signal"]).astype(int)
 
+    # 趨勢過濾：EMA 200，僅在價格 > EMA200 做多、< EMA200 做空
+    out["ema_200"] = close.ewm(span=200, adjust=False).mean()
+
     return out
 
 
@@ -89,8 +92,10 @@ class ExitRules:
     """出場規則（固定結構，僅參數不同）"""
     # 止盈: 固定倍數 R (R = 進場到止損距離)，或 None 表示用 atr_tp_mult
     tp_r_mult: Optional[float] = 2.0
-    # 止損: 固定 ATR 倍數
+    # 止損: 基礎 ATR 倍數（搜尋範圍建議 [1.0, 2.0]）
     sl_atr_mult: float = 1.5
+    # 追蹤止損: 價格有利移動後以 ATR 倍數追蹤，None 表示不啟用
+    trailing_stop_atr_mult: Optional[float] = None
     # 固定時間出場（K 線根數），None 表示不啟用
     exit_after_bars: Optional[int] = None
     # 固定止盈 %（可選，若設則覆蓋 tp_r_mult 的結果取較大者）
@@ -259,7 +264,17 @@ class StrategyBNB:
                 if score < required:
                     continue
 
-            close = float(row["close"])
+            # 趨勢過濾：僅在價格 > EMA200 做多、< EMA200 做空
+            close_val = float(row["close"])
+            ema200 = row.get("ema_200")
+            if pd.notna(ema200):
+                ema200 = float(ema200)
+                if self.direction == "long" and close_val <= ema200:
+                    continue
+                if self.direction == "short" and close_val >= ema200:
+                    continue
+
+            close = close_val
             atr = float(row.get("atr", 0.0))
             if atr <= 0 and "volatility" in row.index:
                 atr = float(row["volatility"]) * close

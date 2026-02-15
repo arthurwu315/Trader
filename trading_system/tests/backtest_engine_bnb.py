@@ -96,11 +96,17 @@ class BacktestEngineBNB:
                 exit_row = df.iloc[exit_idx]
                 exit_price = float(exit_row["close"])
                 exit_time = exit_row["timestamp"]
-                # 仍檢查區間內是否先觸 SL/TP
+                hard_long = entry_price * 0.98
+                hard_short = entry_price * 1.02
+                # 仍檢查區間內是否先觸硬止損(2%)、SL、TP
                 for j in range(start_idx, exit_idx + 1):
                     r = df.iloc[j]
                     h, l_ = float(r["high"]), float(r["low"])
                     if side == "BUY":
+                        if l_ <= hard_long:
+                            exit_price, exit_time = hard_long, r["timestamp"]
+                            exit_idx = j
+                            break
                         if l_ <= sl_price:
                             exit_price, exit_time = sl_price, r["timestamp"]
                             exit_idx = j
@@ -110,6 +116,10 @@ class BacktestEngineBNB:
                             exit_idx = j
                             break
                     else:
+                        if h >= hard_short:
+                            exit_price, exit_time = hard_short, r["timestamp"]
+                            exit_idx = j
+                            break
                         if h >= sl_price:
                             exit_price, exit_time = sl_price, r["timestamp"]
                             exit_idx = j
@@ -119,8 +129,11 @@ class BacktestEngineBNB:
                             exit_idx = j
                             break
             else:
+                trailing = getattr(strategy.exit_rules, "trailing_stop_atr_mult", None)
                 exit_idx, exit_price, exit_time = simulate_trade(
-                    df, start_idx, side, entry_price, sl_price, tp_price
+                    df, start_idx, side, entry_price, sl_price, tp_price,
+                    hard_stop_position_pct=2.0,
+                    trailing_stop_atr_mult=trailing,
                 )
 
             direction = 1 if side == "BUY" else -1

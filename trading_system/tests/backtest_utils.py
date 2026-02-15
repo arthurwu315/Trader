@@ -145,28 +145,51 @@ def simulate_trade(
     entry_price: float,
     stop_price: float,
     tp_price: float,
+    hard_stop_position_pct: float = 2.0,
+    trailing_stop_atr_mult: Optional[float] = None,
 ) -> tuple[int, float, pd.Timestamp]:
+    """
+    依序檢查：硬止損(2% 倉位)、追蹤止損、原止損/止盈。
+    hard_stop_position_pct: 單筆虧損達此% 價格即平倉（防 100% 回撤）。
+    trailing_stop_atr_mult: 若設，價格有利時以 ATR 倍數追蹤止損。
+    """
+    current_sl = stop_price
+    hard_long = entry_price * (1 - hard_stop_position_pct / 100.0)
+    hard_short = entry_price * (1 + hard_stop_position_pct / 100.0)
+    atr_col = df["atr"] if "atr" in df.columns else pd.Series(0.0, index=df.index)
+
     for i in range(start_index, len(df)):
         row = df.iloc[i]
-        high = row["high"]
-        low = row["low"]
+        high = float(row["high"])
+        low = float(row["low"])
+        atr = float(atr_col.iloc[i]) if i < len(atr_col) else 0.0
+        if atr <= 0:
+            atr = entry_price * 0.02
 
         if side == "BUY":
-            hit_stop = low <= stop_price
+            if low <= hard_long:
+                return i, hard_long, row["timestamp"]
+            if trailing_stop_atr_mult is not None and high > entry_price:
+                current_sl = max(current_sl, high - trailing_stop_atr_mult * atr)
+            hit_stop = low <= current_sl
             hit_tp = high >= tp_price
             if hit_stop and hit_tp:
-                return i, stop_price, row["timestamp"]
+                return i, current_sl, row["timestamp"]
             if hit_stop:
-                return i, stop_price, row["timestamp"]
+                return i, current_sl, row["timestamp"]
             if hit_tp:
                 return i, tp_price, row["timestamp"]
         else:
-            hit_stop = high >= stop_price
+            if high >= hard_short:
+                return i, hard_short, row["timestamp"]
+            if trailing_stop_atr_mult is not None and low < entry_price:
+                current_sl = min(current_sl, low + trailing_stop_atr_mult * atr)
+            hit_stop = high >= current_sl
             hit_tp = low <= tp_price
             if hit_stop and hit_tp:
-                return i, stop_price, row["timestamp"]
+                return i, current_sl, row["timestamp"]
             if hit_stop:
-                return i, stop_price, row["timestamp"]
+                return i, current_sl, row["timestamp"]
             if hit_tp:
                 return i, tp_price, row["timestamp"]
 

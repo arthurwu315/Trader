@@ -1,9 +1,8 @@
 """
-遞迴優化引擎 (orchestrator) - 因子投票機制
-- 三因子投票：Funding Z、RSI Z、Price Breakout；總分 >= min_score 即進場（min_score 搜尋 [1, 2]）
-- funding_z_threshold [0.5, 2.0]、rsi_z_threshold [0.5, 2.0]（放寬 Z 範圍）
-- 若全部 0 交易：自動列出最接近進場的 5 組參數並回報缺了什麼條件
-- 報告檔名含時間戳記：report_YYYYMMDD_HHMM.json
+遞迴優化引擎 (orchestrator) - 自適應趨勢與風控升級
+- 目標函數：卡瑪比率 Calmar = Annual Return / Max Drawdown
+- 三因子投票 + EMA200 趨勢過濾；min_score [1, 2]；base_sl_atr_mult [1.0, 2.0] 追蹤止損
+- 兩年內交易 < 20 筆：評分 -10 懲罰；報告檔名含時間戳記
 """
 from __future__ import annotations
 
@@ -49,12 +48,17 @@ STEP_FUNDING_Z_INIT = 0.5   # 第一輪 → 4 點 (0.5,1,1.5,2)
 STEP_RSI_Z_INIT = 0.5       # 第一輪 → 4 點
 MIN_SCORE_VALS = [1, 2]     # 進場門檻：總分 >= min_score
 
-# 最低交易頻率：少於此筆數直接負分
+# 最低交易頻率：少於此筆數直接負分（防呆：零交易陷阱）
 MIN_TRADES_FOR_VALID = 20
-PENALTY_RATIO_IF_LOW_TRADES = -10.0  # 強制負分
+PENALTY_RATIO_IF_LOW_TRADES = -10.0
 
-# 固定：止損 ATR 倍數、其他因子
-FIXED_SL_ATR = 2.0
+# 動態止損：基礎 ATR 倍數搜尋範圍 [1.0, 2.0]
+BASE_SL_ATR_MIN = 1.0
+BASE_SL_ATR_MAX = 2.0
+STEP_SL_ATR = 0.5  # 1.0, 1.5, 2.0
+BASE_SL_VALS = [1.0, 1.5, 2.0]
+
+# 固定
 FIXED_OI = 1.2
 FIXED_VOLATILITY = 0.01
 FIXED_TP_R_MULT = 2.0
@@ -72,8 +76,8 @@ def get_load_average() -> float:
         return 0.0
 
 
-def build_candidates_round1() -> List[Tuple[float, float, int, str]]:
-    """第一輪：funding_z [0.5, 2.0]、rsi_z [0.5, 2.0]、min_score [1, 2]、做多+做空"""
+def build_candidates_round1() -> List[Tuple[float, float, int, float, str]]:
+    """第一輪：funding_z、rsi_z、min_score、base_sl_atr [1, 1.5, 2]、long+short"""
     fz_vals = []
     x = FUNDING_Z_MIN
     while x <= FUNDING_Z_MAX:
@@ -88,8 +92,9 @@ def build_candidates_round1() -> List[Tuple[float, float, int, str]]:
     for fz in fz_vals:
         for rz in rz_vals:
             for ms in MIN_SCORE_VALS:
-                for d in ("long", "short"):
-                    out.append((fz, rz, ms, d))
+                for base_sl in BASE_SL_VALS:
+                    for d in ("long", "short"):
+                        out.append((fz, rz, ms, base_sl, d))
     return out
 
 
@@ -97,19 +102,20 @@ def build_candidates_around_center(
     center_fz: float,
     center_rz: float,
     center_min_score: int,
+    center_base_sl: float,
     center_direction: str,
     step_fz: float,
     step_rz: float,
-) -> List[Tuple[float, float, int, str]]:
-    """以中心為準、同 min_score 與方向，步長內 5 組"""
+) -> List[Tuple[float, float, int, float, str]]:
+    """以中心為準、同 min_score / base_sl / 方向，步長內 5 組"""
     candidates = [
-        (center_fz, center_rz, center_min_score, center_direction),
-        (min(FUNDING_Z_MAX, center_fz + step_fz), center_rz, center_min_score, center_direction),
-        (max(FUNDING_Z_MIN, center_fz - step_fz), center_rz, center_min_score, center_direction),
-        (center_fz, min(RSI_Z_MAX, center_rz + step_rz), center_min_score, center_direction),
-        (center_fz, max(RSI_Z_MIN, center_rz - step_rz), center_min_score, center_direction),
+        (center_fz, center_rz, center_min_score, center_base_sl, center_direction),
+        (min(FUNDING_Z_MAX, center_fz + step_fz), center_rz, center_min_score, center_base_sl, center_direction),
+        (max(FUNDING_Z_MIN, center_fz - step_fz), center_rz, center_min_score, center_base_sl, center_direction),
+        (center_fz, min(RSI_Z_MAX, center_rz + step_rz), center_min_score, center_base_sl, center_direction),
+        (center_fz, max(RSI_Z_MIN, center_rz - step_rz), center_min_score, center_base_sl, center_direction),
     ]
-    return list(dict.fromkeys([(round(a, 2), round(b, 2), c, d) for a, b, c, d in candidates]))
+    return list(dict.fromkeys([(round(a, 2), round(b, 2), c, d, e) for a, b, c, d, e in candidates]))
 
 
 def load_data():
@@ -128,10 +134,9 @@ def load_data():
 
 
 def params_to_variant(
-    funding_z: float, rsi_z: float, min_score: int, direction: str
+    funding_z: float, rsi_z: float, min_score: int, base_sl_atr: float, direction: str
 ) -> Tuple[Dict[str, float], Any]:
     from bots.bot_c.strategy_bnb import ExitRules
-    # 因子投票：僅三因子（Funding Z、RSI Z、Price Breakout），總分 >= min_score 進場
     entry_thresholds = {
         "funding_z_threshold": funding_z,
         "rsi_z_threshold": rsi_z,
@@ -143,7 +148,8 @@ def params_to_variant(
         entry_thresholds["price_breakout_short"] = 1.0
     exit_rules = ExitRules(
         tp_r_mult=FIXED_TP_R_MULT,
-        sl_atr_mult=FIXED_SL_ATR,
+        sl_atr_mult=base_sl_atr,
+        trailing_stop_atr_mult=None,
         exit_after_bars=None,
         tp_fixed_pct=None,
     )
@@ -156,10 +162,11 @@ def run_single(
     funding_z: float,
     rsi_z: float,
     min_score: int,
+    base_sl_atr: float,
     direction: str,
 ) -> Dict[str, Any]:
     from bots.bot_c.strategy_bnb import StrategyBNB
-    entry_th, exit_rules = params_to_variant(funding_z, rsi_z, min_score, direction)
+    entry_th, exit_rules = params_to_variant(funding_z, rsi_z, min_score, base_sl_atr, direction)
     strategy = StrategyBNB(
         entry_thresholds=entry_th,
         exit_rules=exit_rules,
@@ -168,30 +175,36 @@ def run_single(
         min_factors_required=min_score,
     )
     res = engine.run(strategy, data, fee_bps=FEE_BPS, slippage_bps=SLIPPAGE_BPS)
+    total_return_pct = res.get("total_return_pct") or 0
+    max_dd = res.get("max_drawdown_pct") or 0
     return {
         "funding_z_threshold": funding_z,
         "rsi_z_threshold": rsi_z,
         "min_score": min_score,
+        "base_sl_atr_mult": base_sl_atr,
         "direction": direction,
         "result": res,
+        "total_return_pct": total_return_pct,
         "weekly_return_pct": res.get("weekly_return_pct") or 0,
-        "max_drawdown_pct": res.get("max_drawdown_pct") or 0,
+        "max_drawdown_pct": max_dd,
         "trades_count": res.get("trades_count", 0),
         "profitable": res.get("profitable_after_fees", False),
     }
 
 
 def compute_ratio(rec: Dict[str, Any]) -> float:
+    """目標函數：卡瑪比率 Calmar = Annual Return / Max Drawdown。兩年內 < 20 筆交易給 -10 懲罰。"""
     if rec.get("trades_count", 0) < MIN_TRADES_FOR_VALID:
         return PENALTY_RATIO_IF_LOW_TRADES
-    dd = max(rec["max_drawdown_pct"], MIN_DD_FOR_RATIO)
-    return rec["weekly_return_pct"] / dd
+    annual_return_pct = (rec.get("total_return_pct") or 0) / 2.0  # 回測區間 2 年
+    dd = max(rec.get("max_drawdown_pct", 0), 0.01)
+    return annual_return_pct / dd
 
 
 def run_batch_with_resource_guard(
     data,
     engine,
-    candidates: List[Tuple[float, float, int, str]],
+    candidates: List[Tuple[float, float, int, float, str]],
 ) -> List[Dict[str, Any]]:
     results = []
     for start in range(0, len(candidates), BATCH_SIZE):
@@ -200,8 +213,8 @@ def run_batch_with_resource_guard(
         if load_before > LOAD_AVG_THRESHOLD:
             print(f"  [資源] load average {load_before:.2f} > {LOAD_AVG_THRESHOLD}，放慢 {SLEEP_WHEN_LOAD_HIGH}s")
             time.sleep(SLEEP_WHEN_LOAD_HIGH)
-        for (fz, rz, ms, d) in batch:
-            rec = run_single(data, engine, fz, rz, ms, d)
+        for (fz, rz, ms, base_sl, d) in batch:
+            rec = run_single(data, engine, fz, rz, ms, base_sl, d)
             rec["ratio"] = compute_ratio(rec)
             results.append(rec)
         time.sleep(SLEEP_BETWEEN_BATCHES)
@@ -224,7 +237,9 @@ def find_best(results: List[Dict[str, Any]]) -> Tuple[int, Dict[str, Any]]:
     return best_idx, results[best_idx]
 
 
-def write_best_strategy_py(funding_z: float, rsi_z: float, min_score: int, direction: str, ratio: float):
+def write_best_strategy_py(
+    funding_z: float, rsi_z: float, min_score: int, base_sl_atr: float, direction: str, ratio: float
+):
     BOT_C.mkdir(parents=True, exist_ok=True)
     if direction == "long":
         entry_lines = f"""    "funding_z_threshold": {funding_z},
@@ -237,8 +252,8 @@ def write_best_strategy_py(funding_z: float, rsi_z: float, min_score: int, direc
     "min_score": {min_score},
     "price_breakout_short": 1.0,"""
     content = f'''"""
-BNB/USDT 因子投票策略（Funding Z + RSI Z + Price Breakout, min_score={min_score}）
-funding_z={funding_z}, rsi_z={rsi_z}, direction={direction!r}, 優化比={ratio:.4f}
+BNB/USDT 因子投票 + EMA200 趨勢 + 動態止損（base_sl_atr={base_sl_atr}）
+funding_z={funding_z}, rsi_z={rsi_z}, min_score={min_score}, direction={direction!r}, Calmar={ratio:.4f}
 """
 from __future__ import annotations
 
@@ -254,7 +269,8 @@ ENTRY_THRESHOLDS = {{
 
 EXIT_RULES = ExitRules(
     tp_r_mult={FIXED_TP_R_MULT},
-    sl_atr_mult={FIXED_SL_ATR},
+    sl_atr_mult={base_sl_atr},
+    trailing_stop_atr_mult=None,
     exit_after_bars=None,
     tp_fixed_pct=None,
 )
@@ -280,7 +296,7 @@ def main():
     optimization_path_file = LOG_DIR / f"optimization_path_{report_ts}.json"
     final_report_file = LOG_DIR / f"final_report_{report_ts}.json"
 
-    print("遞迴優化引擎 (自適應 Z-Score): 載入資料...")
+    print("遞迴優化引擎 (Calmar 優化 + EMA200 趨勢 + 動態止損): 載入資料...")
     try:
         data = load_data()
     except Exception as e:
@@ -291,7 +307,7 @@ def main():
     print(f"  K 線: {len(data)}")
     load0 = get_load_average()
     print(f"  目前 load average: {load0:.2f}")
-    print(f"  搜尋: funding_z_threshold [{FUNDING_Z_MIN}, {FUNDING_Z_MAX}], rsi_z_threshold [{RSI_Z_MIN}, {RSI_Z_MAX}], 最低有效交易數={MIN_TRADES_FOR_VALID}")
+    print(f"  搜尋: funding_z [{FUNDING_Z_MIN},{FUNDING_Z_MAX}], rsi_z [{RSI_Z_MIN},{RSI_Z_MAX}], base_sl_atr {BASE_SL_VALS}, min_score {MIN_SCORE_VALS}, 最低交易數={MIN_TRADES_FOR_VALID} (否則 -10)")
     print(f"  報告檔: {optimization_path_file.name}, {final_report_file.name}")
 
     from backtest_engine_bnb import BacktestEngineBNB
@@ -302,6 +318,7 @@ def main():
     center_fz = 1.0
     center_rz = 1.0
     center_min_score = 1
+    center_base_sl = 1.5
     center_direction = "long"
     optimization_path: List[Dict[str, Any]] = []
     best_overall: Dict[str, Any] = {}
@@ -309,12 +326,13 @@ def main():
 
     # 第一輪
     candidates = build_candidates_round1()
-    print(f"\n[第 1 輪] 全組合 {len(candidates)} 組 (funding_z 步長 {step_fz}, rsi_z 步長 {step_rz}, min_score {MIN_SCORE_VALS}, long+short)")
+    print(f"\n[第 1 輪] 全組合 {len(candidates)} 組 (Calmar 目標, base_sl {BASE_SL_VALS}, min_score {MIN_SCORE_VALS}, long+short)")
     results = run_batch_with_resource_guard(data, engine, candidates)
     best_idx, best_rec = find_best(results)
     center_fz = best_rec["funding_z_threshold"]
     center_rz = best_rec["rsi_z_threshold"]
     center_min_score = best_rec.get("min_score", 1)
+    center_base_sl = best_rec.get("base_sl_atr_mult", 1.5)
     center_direction = best_rec["direction"]
     best_ratio_overall = best_rec.get("ratio", PENALTY_RATIO_IF_LOW_TRADES)
     best_overall = best_rec
@@ -327,6 +345,7 @@ def main():
         "best_funding_z_threshold": center_fz,
         "best_rsi_z_threshold": center_rz,
         "best_min_score": center_min_score,
+        "best_base_sl_atr_mult": center_base_sl,
         "best_direction": center_direction,
         "best_ratio": round(best_ratio_overall, 6),
         "best_trades_count": best_rec.get("trades_count", 0),
@@ -335,7 +354,7 @@ def main():
         "load_avg_after": round(get_load_average(), 2),
     }
     optimization_path.append(path_entry)
-    print(f"  勝出: funding_z={center_fz}, rsi_z={center_rz}, min_score={center_min_score}, direction={center_direction}, ratio={best_ratio_overall:.4f}, trades={best_rec.get('trades_count', 0)}")
+    print(f"  勝出: fz={center_fz}, rz={center_rz}, min_score={center_min_score}, base_sl={center_base_sl}, dir={center_direction}, Calmar={best_ratio_overall:.4f}, trades={best_rec.get('trades_count', 0)}")
     gc.collect()
 
     # 遞迴
@@ -345,13 +364,16 @@ def main():
         if step_fz <= MIN_STEP_Z and step_rz <= MIN_STEP_Z:
             print(f"\n[終止] 步長已達下限")
             break
-        candidates = build_candidates_around_center(center_fz, center_rz, center_min_score, center_direction, step_fz, step_rz)
-        print(f"\n[第 {recursion + 1} 輪] 中心=({center_fz}, {center_rz}, min_score={center_min_score}, {center_direction}), 步長 fz={step_fz:.2f} rz={step_rz:.2f}, 共 {len(candidates)} 組")
+        candidates = build_candidates_around_center(
+            center_fz, center_rz, center_min_score, center_base_sl, center_direction, step_fz, step_rz
+        )
+        print(f"\n[第 {recursion + 1} 輪] 中心=({center_fz}, {center_rz}, ms={center_min_score}, sl={center_base_sl}, {center_direction}), 共 {len(candidates)} 組")
         results = run_batch_with_resource_guard(data, engine, candidates)
         best_idx, best_rec = find_best(results)
         new_fz = best_rec["funding_z_threshold"]
         new_rz = best_rec["rsi_z_threshold"]
         new_min_score = best_rec.get("min_score", 1)
+        new_base_sl = best_rec.get("base_sl_atr_mult", 1.5)
         new_direction = best_rec["direction"]
         new_ratio = best_rec.get("ratio", PENALTY_RATIO_IF_LOW_TRADES)
         path_entry = {
@@ -363,6 +385,7 @@ def main():
             "best_funding_z_threshold": new_fz,
             "best_rsi_z_threshold": new_rz,
             "best_min_score": new_min_score,
+            "best_base_sl_atr_mult": new_base_sl,
             "best_direction": new_direction,
             "best_ratio": round(new_ratio, 6),
             "best_trades_count": best_rec.get("trades_count", 0),
@@ -377,8 +400,9 @@ def main():
             center_fz = new_fz
             center_rz = new_rz
             center_min_score = new_min_score
+            center_base_sl = new_base_sl
             center_direction = new_direction
-            print(f"  勝出: funding_z={center_fz}, rsi_z={center_rz}, min_score={center_min_score}, direction={center_direction}, ratio={best_ratio_overall:.4f}, trades={best_rec.get('trades_count', 0)}")
+            print(f"  勝出: fz={center_fz}, rz={center_rz}, ms={center_min_score}, base_sl={center_base_sl}, dir={center_direction}, Calmar={best_ratio_overall:.4f}, trades={best_rec.get('trades_count', 0)}")
         else:
             print(f"  本輪最佳 ratio={new_ratio:.4f} 未超越 {best_ratio_overall:.4f}，保留原中心")
         gc.collect()
@@ -386,9 +410,10 @@ def main():
     final_fz = best_overall.get("funding_z_threshold", center_fz)
     final_rz = best_overall.get("rsi_z_threshold", center_rz)
     final_min_score = best_overall.get("min_score", center_min_score)
+    final_base_sl = best_overall.get("base_sl_atr_mult", center_base_sl)
     final_direction = best_overall.get("direction", center_direction)
-    write_best_strategy_py(final_fz, final_rz, final_min_score, final_direction, best_ratio_overall)
-    print(f"\n已寫入 {BEST_STRATEGY_PY} (funding_z={final_fz}, rsi_z={final_rz}, min_score={final_min_score}, direction={final_direction})")
+    write_best_strategy_py(final_fz, final_rz, final_min_score, final_base_sl, final_direction, best_ratio_overall)
+    print(f"\n已寫入 {BEST_STRATEGY_PY} (fz={final_fz}, rz={final_rz}, min_score={final_min_score}, base_sl={final_base_sl}, dir={final_direction})")
 
     opt_report = {
         "generated_at": datetime.utcnow().isoformat() + "Z",
@@ -396,6 +421,7 @@ def main():
         "best_funding_z_threshold": final_fz,
         "best_rsi_z_threshold": final_rz,
         "best_min_score": final_min_score,
+        "best_base_sl_atr_mult": final_base_sl,
         "best_direction": final_direction,
         "best_ratio": round(best_ratio_overall, 6),
         "min_trades_for_valid": MIN_TRADES_FOR_VALID,
@@ -405,7 +431,7 @@ def main():
         json.dump(opt_report, f, indent=2, ensure_ascii=False)
     print(f"已寫入 {optimization_path_file}")
 
-    entry_th, _ = params_to_variant(final_fz, final_rz, final_min_score, final_direction)
+    entry_th, _ = params_to_variant(final_fz, final_rz, final_min_score, final_base_sl, final_direction)
     variants_out = [{
         "id": "best",
         "entry_thresholds": entry_th,
@@ -430,6 +456,7 @@ def main():
             "funding_z_threshold": final_fz,
             "rsi_z_threshold": final_rz,
             "min_score": final_min_score,
+            "base_sl_atr_mult": final_base_sl,
             "direction": final_direction,
             "ratio": round(best_ratio_overall, 6),
             "min_trades_required": MIN_TRADES_FOR_VALID,
@@ -441,15 +468,15 @@ def main():
     if best_overall.get("trades_count", 0) == 0:
         from bots.bot_c.strategy_bnb import StrategyBNB
         closest_5_params = [
-            (0.5, 0.5, 1, "long"),
-            (0.5, 0.5, 1, "short"),
-            (1.0, 0.5, 1, "long"),
-            (0.5, 1.0, 1, "long"),
-            (1.0, 1.0, 1, "short"),
+            (0.5, 0.5, 1, 1.5, "long"),
+            (0.5, 0.5, 1, 1.5, "short"),
+            (1.0, 0.5, 1, 1.5, "long"),
+            (0.5, 1.0, 1, 1.5, "long"),
+            (1.0, 1.0, 1, 1.5, "short"),
         ]
         fallback_entries = []
-        for fz, rz, ms, d in closest_5_params:
-            entry_th, exit_rules = params_to_variant(fz, rz, ms, d)
+        for fz, rz, ms, base_sl, d in closest_5_params:
+            entry_th, exit_rules = params_to_variant(fz, rz, ms, base_sl, d)
             strat = StrategyBNB(
                 entry_thresholds=entry_th,
                 exit_rules=exit_rules,
@@ -470,6 +497,7 @@ def main():
                 "funding_z_threshold": fz,
                 "rsi_z_threshold": rz,
                 "min_score": ms,
+                "base_sl_atr_mult": base_sl,
                 "direction": d,
                 "score_distribution": dist,
                 "missing": missing,
