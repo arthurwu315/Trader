@@ -1,0 +1,22 @@
+# AI 行為準則 - BNB/USDT 交易系統開發
+
+## 資源限制
+- 禁止進行全域檔案掃描。修改程式碼時優先參考已開啟的檔案。
+- 避免對 db/、logs/、.cache/ 進行遞迴搜尋。
+
+## 策略標準
+所有生成的策略必須符合：
+- 日交易數 ≤ 5
+- 周報酬 ≥ 1%
+- 最大回撤 ≤ 10%
+
+## 開發流程
+- 生成策略後，自動將參數存入 `trading_system/bots/bot_c/variants.json`，並建立對應的 `.py` 檔案。
+
+## Git 與存檔
+- 每當完成重大邏輯修改，必須自動執行 git commit，格式為「Refactor: [描述]」。
+- 若回測結果 Calmar Ratio > 1，則標註為「Milestone: Profitable Strategy」。
+
+## 禁止行為
+- 禁止 AI 自行啟動耗時的回測，除非使用者明確要求執行 `nice -n 19` 腳本。
+- 批量回測應透過 orchestrator 或任務「Run Optimized Backtest」執行。

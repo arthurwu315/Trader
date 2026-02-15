@@ -22,11 +22,13 @@ build/
 
 # 交易系統：資料庫、日誌、備份、測試快取
 **/db/*.db
+**/db/*.csv
 **/logs/*.log
 **/*.db
 *.log
 **/tests/.cache/
 **/.cache/
+**/tests/logs/*.json
 *.swo
 *.swp
 
@@ -42,3 +44,5 @@ build/
 .cache/
 *.local
 .ssh/
+.bash_history
+.sudo_as_admin_successful

@@ -1,0 +1,28 @@
+# 環境優化：排除大型/無需索引的目錄，防止 1 vCPU/2GB 伺服器索引導致 CPU 飆高
+
+# 資料庫與大型 CSV
+**/db/
+**/*.csv
+**/.cache/
+
+# 日誌（JSON 等）
+**/logs/
+**/*.log
+**/*.json
+!**/variants.json
+
+# Python 快取
+**/__pycache__/
+**/*.pyc
+**/.mypy_cache/
+**/.pytest_cache/
+
+# 版本與虛擬環境
+.git/
+.venv/
+venv/
+env/
+
+# 大型二進位與備份
+**/*.db
+**/backup*/
