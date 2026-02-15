@@ -92,6 +92,8 @@ class ExitRules:
     """出場規則（固定結構，僅參數不同）"""
     # 止盈: 固定倍數 R (R = 進場到止損距離)，或 None 表示用 atr_tp_mult
     tp_r_mult: Optional[float] = 2.0
+    # 快速止盈: 止盈 ATR 倍數（若設則優先於 tp_r_mult，搜尋 [1.5, 2.5, 3.5]）
+    tp_atr_mult: Optional[float] = None
     # 止損: 基礎 ATR 倍數（搜尋範圍建議 [1.0, 2.0]）
     sl_atr_mult: float = 1.5
     # 追蹤止損: 價格有利移動後以 ATR 倍數追蹤，None 表示不啟用
@@ -282,10 +284,13 @@ class StrategyBNB:
                 atr = close * 0.02
 
             er = self.exit_rules
+            tp_atr = getattr(er, "tp_atr_mult", None)
             if self.direction == "long":
                 sl = close - er.sl_atr_mult * atr
                 r_dist = close - sl
-                if er.tp_r_mult is not None:
+                if tp_atr is not None:
+                    tp = close + tp_atr * atr
+                elif er.tp_r_mult is not None:
                     tp = close + er.tp_r_mult * r_dist
                 else:
                     tp = close + er.sl_atr_mult * atr * 2
@@ -295,7 +300,9 @@ class StrategyBNB:
             else:
                 sl = close + er.sl_atr_mult * atr
                 r_dist = sl - close
-                if er.tp_r_mult is not None:
+                if tp_atr is not None:
+                    tp = close - tp_atr * atr
+                elif er.tp_r_mult is not None:
                     tp = close - er.tp_r_mult * r_dist
                 else:
                     tp = close - er.sl_atr_mult * atr * 2
