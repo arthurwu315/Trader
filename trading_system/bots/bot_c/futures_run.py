@@ -11,8 +11,25 @@ import json
 import os
 import sys
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from pathlib import Path
+
+# 台灣時區 (UTC+8)：print / Telegram 顯示用此；paper_signals.json、heartbeat 寫入維持 UTC
+TZ_TAIWAN = timezone(timedelta(hours=8))
+
+
+def _now_taiwan() -> datetime:
+    """目前時間（台灣）。"""
+    return datetime.now(TZ_TAIWAN)
+
+
+def _format_taiwan(dt: datetime | None) -> str:
+    """將 datetime 轉為台灣時間顯示字串；若為 naive 則視為 UTC 再轉 +8。"""
+    if dt is None:
+        return "N/A"
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(TZ_TAIWAN).strftime("%Y-%m-%d %H:%M:%S")
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
@@ -41,6 +58,8 @@ LOOP_SLEEP_SEC = 180  # 每 3 分鐘一輪
 HARD_STOP_PCT = 2.0   # 2% 硬止損
 LEVERAGE = 3
 RISK_PCT_OF_EQUITY = 0.0025  # 0.25% 風險
+# 每日總結觸發小時（目前=7 為測試用，驗證通知後請改回 8）
+SUMMARY_TRIGGER_HOUR = 8
 
 
 def get_client():
@@ -275,15 +294,70 @@ def _get_telegram_notifier():
         return None
 
 
-def _send_daily_summary(notifier, last_sent_date: str) -> str:
+def _get_wallet_balance_usdt(client) -> float:
+    """從 API 獲取 USDT 總餘額（Total Wallet Balance）。失敗回傳 0，不拋錯。"""
+    try:
+        for b in (client.get_balance() or []):
+            if b.get("asset") == "USDT":
+                return float(b.get("balance", 0) or 0)
+    except Exception:
+        pass
+    return 0.0
+
+
+def _get_daily_realized_pnl(client, symbol: str, hours: int = 24) -> float:
+    """過去 hours 小時內已實現盈虧 + 資金費。失敗回傳 0，不拋錯。"""
+    try:
+        cutoff_ms = int(time.time() * 1000) - hours * 3600 * 1000
+        items = client.get_income_history(symbol=symbol, limit=500)
+        total = 0.0
+        for x in items or []:
+            if x.get("asset") != "USDT":
+                continue
+            t = x.get("incomeType", "")
+            if t not in ("REALIZED_PNL", "FUNDING_FEE"):
+                continue
+            if int(x.get("time", 0) or 0) < cutoff_ms:
+                continue
+            total += float(x.get("income", 0) or 0)
+        return total
+    except Exception:
+        pass
+    return 0.0
+
+
+def _send_daily_summary(client, notifier, last_sent_date: str) -> str:
+    """每日實戰總結：API 總餘額、昨日盈虧、持倉浮動 + 本地訊號統計。觸發為台灣時間 8 點。"""
     from datetime import date, timedelta
-    today = date.today()
-    if last_sent_date and last_sent_date == today.isoformat():
+    now_tw = _now_taiwan()
+    today_tw = now_tw.date()
+    if last_sent_date and last_sent_date == today_tw.isoformat():
         return last_sent_date
-    now_local = datetime.now()
-    if now_local.hour != 8:
+    if now_tw.hour != SUMMARY_TRIGGER_HOUR:
         return last_sent_date
-    yesterday = (today - timedelta(days=1)).isoformat()
+    yesterday_tw = today_tw - timedelta(days=1)
+    yesterday = yesterday_tw.isoformat()
+    current_time = now_tw.strftime("%Y-%m-%d %H:%M")
+
+    balance = 0.0
+    daily_pnl = 0.0
+    position_info = get_position_info(client, SYMBOL)
+    try:
+        balance = _get_wallet_balance_usdt(client)
+        daily_pnl = _get_daily_realized_pnl(client, SYMBOL, hours=24)
+    except Exception as e:
+        print(f"  [WARN] 每日總結 API 取得失敗（不中斷）: {e}")
+
+    pnl_pct = (daily_pnl / balance * 100) if balance and balance > 0 else 0.0
+    if position_info:
+        pos = position_info
+        current_position_info = (
+            f"{pos['side']} {abs(pos['positionAmt'])} BNB | "
+            f"開倉價 {pos['entryPrice']} | 浮動盈虧 {pos['unrealizedProfit']:+.2f} USDT"
+        )
+    else:
+        current_position_info = "無持倉"
+
     records = []
     if SIGNALS_FILE.exists():
         try:
@@ -293,23 +367,48 @@ def _send_daily_summary(notifier, last_sent_date: str) -> str:
             records = []
     if not isinstance(records, list):
         records = []
-    yesterday_signals = [r for r in records if (r.get("time_utc") or "").startswith(yesterday)]
-    total = len(records)
+    # 昨日訊號：依台灣「昨日」篩選（time_utc 為 UTC，轉台灣日期再比對）
+    def _utc_str_to_taiwan_date(utc_str: str) -> date | None:
+        try:
+            from datetime import datetime as dt_parse
+            if not utc_str:
+                return None
+            # 支援 ISO 含 +00:00 或 Z
+            t = dt_parse.fromisoformat(utc_str.replace("Z", "+00:00"))
+            return t.astimezone(TZ_TAIWAN).date()
+        except Exception:
+            return None
+    yesterday_signals = [r for r in records if _utc_str_to_taiwan_date(r.get("time_utc") or "") == yesterday_tw]
+    total_count = len(records)
     longs = sum(1 for s in records if (s.get("side") or "").upper() == "BUY")
     shorts = sum(1 for s in records if (s.get("side") or "").upper() == "SELL")
+    count = len(yesterday_signals)
+
     msg = (
-        f"📊 <b>昨日戰報 (Testnet)</b> ({yesterday})\n"
-        f"昨日訊號: {len(yesterday_signals)} | 累計: {total} (多: {longs} / 空: {shorts})\n"
-        f"⏰ {now_local.strftime('%Y-%m-%d %H:%M')}"
+        "📊 <b>【Strategy C】每日實戰總結</b>\n"
+        f"📅 日期：{yesterday}\n"
+        "-------------------------\n"
+        "💰 <b>帳戶狀態</b>\n"
+        f"總餘額：{balance:.2f} USDT\n"
+        f"昨日盈虧：{daily_pnl:+.2f} USDT ({pnl_pct:+.2f}%)\n"
+        "📈 <b>交易統計</b>\n"
+        f"昨日訊號：{count} 筆\n"
+        f"累計總筆數：{total_count} (多:{longs} / 空:{shorts})\n"
+        "🛡️ <b>當前持倉</b>\n"
+        f"{current_position_info}\n"
+        f"⏰ 報時：{current_time}"
     )
     if notifier and getattr(notifier, "send_message", None):
-        notifier.send_message(msg)
-    return today.isoformat()
+        try:
+            notifier.send_message(msg)
+        except Exception as e:
+            print(f"  [WARN] 每日總結 Telegram 發送失敗: {e}")
+    return today_tw.isoformat()
 
 
 def send_disconnect_alert():
     ensure_log_dir()
-    msg = f"[{datetime.now(timezone.utc).isoformat()}] 斷線：連續 {CONSECUTIVE_FAIL_THRESHOLD} 輪無法取得 K 線\n"
+    msg = f"[{_now_taiwan().strftime('%Y-%m-%d %H:%M:%S')} UTC+8] 斷線：連續 {CONSECUTIVE_FAIL_THRESHOLD} 輪無法取得 K 線\n"
     with open(DISCONNECT_ALERT_FILE, "a", encoding="utf-8") as f:
         f.write(msg)
     sys.stderr.write(msg)
@@ -371,8 +470,8 @@ def run_once(client, telegram_notifier=None, last_summary_date: str = ""):
                 else:
                     print(f"  [ERR] 市價單未成交")
 
-    last_summary_date = _send_daily_summary(telegram_notifier, last_summary_date)
-    now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+    last_summary_date = _send_daily_summary(client, telegram_notifier, last_summary_date)
+    now = _now_taiwan().strftime("%Y-%m-%d %H:%M:%S")
     _write_heartbeat(datetime.now(timezone.utc).isoformat())
     price = round(float(row.get("close", 0)), 2)
     ema200_raw = row.get("ema_200")
