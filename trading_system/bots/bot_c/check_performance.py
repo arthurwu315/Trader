@@ -12,6 +12,19 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 
+# 載入 Strategy C 的 .env（與 paper_run / main_bot_c 一致）
+try:
+    from dotenv import load_dotenv
+    _bot_dir = Path(__file__).resolve().parent
+    _env_live = _bot_dir / ".env.c_live"
+    _env_testnet = _bot_dir / ".env.c_testnet"
+    if os.getenv("MODE") == "LIVE" and _env_live.exists():
+        load_dotenv(dotenv_path=_env_live)
+    elif _env_testnet.exists():
+        load_dotenv(dotenv_path=_env_testnet)
+except Exception:
+    pass
+
 LOG_DIR = ROOT / "logs"
 PAPER_SIGNALS_FILE = LOG_DIR / "paper_signals.json"
 HEARTBEAT_FILE = LOG_DIR / "paper_last_heartbeat.txt"

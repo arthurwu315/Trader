@@ -2,18 +2,19 @@
   {
     "id": "best",
     "entry_thresholds": {
-      "funding_z_threshold": 1.75,
-      "rsi_z_threshold": 1.88,
+      "funding_z_threshold": 0.62,
+      "rsi_z_threshold": 2.0,
       "min_score": 2,
-      "price_breakout_long": 1.0
+      "price_breakout_short": 1.0
     },
     "exit_rules": {
       "tp_r_mult": 2.0,
+      "tp_atr_mult": 2.5,
       "sl_atr_mult": 2.0,
       "exit_after_bars": null,
       "tp_fixed_pct": null
     },
-    "direction": "long",
-    "best_ratio": -0.037336
+    "direction": "short",
+    "best_ratio": 13.904141
   }
 ]
