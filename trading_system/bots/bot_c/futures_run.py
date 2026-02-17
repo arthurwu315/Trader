@@ -1,6 +1,6 @@
 """
-Binance Futures Testnet 實戰腳本
-- 每小時掃描 1h K 線，套用 deploy_ready 邏輯
+Binance Futures Testnet 實戰腳本（3 分鐘對齊回測）
+- 每 3 分鐘掃描：3m K 線用於 Z-Score/進場訊號，1h K 線用於 EMA200 牛熊過濾
 - 有訊號時於 Testnet 下 MARKET 單並掛 STOP_MARKET（2% 硬止損）
 - 啟動時自動設定 3x 槓桿、逐倉 (ISOLATED)
 - 使用 Testnet: https://testnet.binancefuture.com
@@ -30,15 +30,19 @@ except Exception:
     pass
 
 SYMBOL = "BNBUSDT"
-INTERVAL = "1h"
-KLINES_LIMIT = 250
+# 多時區：進場用 3m，牛熊過濾用 1h（EMA200）
+INTERVAL_ENTRY = "3m"
+INTERVAL_FILTER = "1h"
+LOOKBACK_ENTRY = 80   # 3m：足夠 atr(14)+breakout(20)，不重複拉大量
+LOOKBACK_FILTER = 220 # 1h：足夠 EMA200(200)+Z-Score 168
 TESTNET_URL = "https://testnet.binancefuture.com"
 LOG_DIR = ROOT / "logs"
 SIGNALS_FILE = LOG_DIR / "paper_signals.json"
 HEARTBEAT_FILE = LOG_DIR / "paper_last_heartbeat.txt"
 DISCONNECT_ALERT_FILE = LOG_DIR / "paper_disconnect_alert.log"
 CONSECUTIVE_FAIL_THRESHOLD = 3
-HARD_STOP_PCT = 2.0  # 2% 硬止損
+LOOP_SLEEP_SEC = 180  # 每 3 分鐘一輪
+HARD_STOP_PCT = 2.0   # 2% 硬止損
 LEVERAGE = 3
 RISK_PCT_OF_EQUITY = 0.0025  # 0.25% 風險
 
@@ -55,7 +59,8 @@ def get_client():
     )
 
 
-def fetch_latest_klines(client, symbol: str = SYMBOL, interval: str = INTERVAL, limit: int = KLINES_LIMIT):
+def fetch_klines(client, symbol: str, interval: str, limit: int):
+    """拉取指定週期 K 線，僅當前循環所需數量以節省記憶體。"""
     import pandas as pd
     rows = client.get_klines(symbol=symbol, interval=interval, limit=limit)
     if not rows:
@@ -77,6 +82,37 @@ def fetch_latest_klines(client, symbol: str = SYMBOL, interval: str = INTERVAL, 
 def add_factors(df):
     from bots.bot_c.strategy_bnb import add_factor_columns
     return add_factor_columns(df)
+
+
+def fetch_merged_row(client, symbol: str = SYMBOL):
+    """
+    多時區同步：3m 進場訊號 + 1h 牛熊過濾。
+    - 1h: EMA200、Funding Z、RSI Z（僅拉 LOOKBACK_FILTER 根）
+    - 3m: close、atr、price_breakout（僅拉 LOOKBACK_ENTRY 根）
+    回傳合併後的最後一根 row，供 get_signal_from_row 使用；失敗回傳 None。
+    """
+    df_1h = fetch_klines(client, symbol, INTERVAL_FILTER, LOOKBACK_FILTER)
+    if df_1h is None or len(df_1h) < 200:
+        return None, None, None
+    df_3m = fetch_klines(client, symbol, INTERVAL_ENTRY, LOOKBACK_ENTRY)
+    if df_3m is None or len(df_3m) < 20:
+        return None, None, None
+    df_1h = add_factors(df_1h)
+    df_3m = add_factors(df_3m)
+    r1 = df_1h.iloc[-1].to_dict()
+    r3 = df_3m.iloc[-1].to_dict()
+    # 進場價/止損用 3m close、atr；牛熊與 Z-Score 用 1h
+    merged = {
+        "close": r3["close"],
+        "ema_200": r1["ema_200"],
+        "atr": r3["atr"],
+        "funding_z_score": r1.get("funding_z_score", 0),
+        "rsi_z_score": r1.get("rsi_z_score", 0),
+        "price_breakout_long": r3.get("price_breakout_long", 0),
+        "price_breakout_short": r3.get("price_breakout_short", 0),
+        "timestamp": r3["timestamp"],
+    }
+    return merged, r1, r3
 
 
 def ensure_log_dir():
@@ -238,24 +274,23 @@ def _send_daily_summary(notifier, last_sent_date: str) -> str:
 
 def send_disconnect_alert():
     ensure_log_dir()
-    msg = f"[{datetime.now(timezone.utc).isoformat()}] 斷線：連續 {CONSECUTIVE_FAIL_THRESHOLD} 小時無法取得 K 線\n"
+    msg = f"[{datetime.now(timezone.utc).isoformat()}] 斷線：連續 {CONSECUTIVE_FAIL_THRESHOLD} 輪無法取得 K 線\n"
     with open(DISCONNECT_ALERT_FILE, "a", encoding="utf-8") as f:
         f.write(msg)
     sys.stderr.write(msg)
 
 
 def run_once(client, telegram_notifier=None, last_summary_date: str = ""):
-    df = fetch_latest_klines(client)
-    if df is None or len(df) < 200:
+    merged, r1h, r3m = fetch_merged_row(client)
+    if merged is None:
         return 1, last_summary_date
-    df = add_factors(df)
-    row = df.iloc[-1].to_dict()
+    row = merged
     from bots.bot_c.deploy_ready import get_signal_from_row, get_deploy_params, HARD_STOP_POSITION_PCT
     signal = get_signal_from_row(row, get_deploy_params())
     hard_stop_pct = HARD_STOP_POSITION_PCT
 
     if signal and signal.should_enter:
-        ts = df.iloc[-1]["timestamp"]
+        ts = row.get("timestamp")
         bar_time = ts.isoformat() if hasattr(ts, "isoformat") else str(ts)
         if has_open_position(client, SYMBOL):
             print(f"  [SKIP] 已有持倉，本根不重複下單")
@@ -298,14 +333,18 @@ def run_once(client, telegram_notifier=None, last_summary_date: str = ""):
     ema200_raw = row.get("ema_200")
     ema200 = round(float(ema200_raw), 2) if ema200_raw is not None and str(ema200_raw) != "nan" else None
     regime = "Bull" if (ema200 is not None and price > ema200) else ("Bear" if ema200 is not None else "N/A")
+    fz = row.get("funding_z_score")
+    rz = row.get("rsi_z_score")
+    fz_str = round(float(fz), 2) if fz is not None and str(fz) != "nan" else "N/A"
+    rz_str = round(float(rz), 2) if rz is not None and str(rz) != "nan" else "N/A"
     sig_str = signal.side if (signal and signal.should_enter) else None
     ema_str = ema200 if ema200 is not None else "N/A"
-    print(f"[Heartbeat] {now} - Price: {price}, EMA200: {ema_str}, Regime: {regime}, Signal: {sig_str}")
+    print(f"[Heartbeat 每3分鐘] {now} - Price: {price} | FundingZ: {fz_str} RSI_Z: {rz_str} | EMA200: {ema_str} Regime: {regime} | Signal: {sig_str}")
     return 0, last_summary_date
 
 
 def main():
-    print("Futures Testnet 實戰啟動：每小時掃描 BNBUSDT 1h，deploy_ready 邏輯，2% 硬止損")
+    print("Futures Testnet 實戰啟動：每 3 分鐘掃描（3m 進場 + 1h EMA200），deploy_ready 邏輯，2% 硬止損")
     client = get_client()
     init_futures_settings(client, SYMBOL, leverage=LEVERAGE, margin_type="ISOLATED")
     telegram_notifier = _get_telegram_notifier()
@@ -319,11 +358,11 @@ def main():
                 consecutive_fail = 0
         except Exception as e:
             consecutive_fail += 1
-            sys.stderr.write(f"[futures_run] 本小時失敗: {e}\n")
+            sys.stderr.write(f"[futures_run] 本輪失敗: {e}\n")
             if consecutive_fail >= CONSECUTIVE_FAIL_THRESHOLD:
                 send_disconnect_alert()
                 consecutive_fail = 0
-        time.sleep(3600)
+        time.sleep(LOOP_SLEEP_SEC)
 
 
 if __name__ == "__main__":
