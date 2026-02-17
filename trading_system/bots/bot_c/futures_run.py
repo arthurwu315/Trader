@@ -119,20 +119,46 @@ def ensure_log_dir():
     LOG_DIR.mkdir(parents=True, exist_ok=True)
 
 
-def init_futures_settings(client, symbol: str, leverage: int = LEVERAGE, margin_type: str = "ISOLATED"):
-    """啟動時設定槓桿與逐倉。"""
+def get_position_info(client, symbol: str) -> dict | None:
+    """取得當前持倉摘要（開倉價、數量、未實現盈虧、保證金模式）。無倉位回傳 None。"""
     try:
+        positions = client.get_position_risk(symbol=symbol)
+        for p in positions or []:
+            amt = float(p.get("positionAmt", 0) or 0)
+            if amt == 0:
+                continue
+            return {
+                "positionAmt": amt,
+                "entryPrice": float(p.get("entryPrice", 0) or 0),
+                "unrealizedProfit": float(p.get("unrealizedProfit", 0) or 0),
+                "marginType": (p.get("marginType") or "UNKNOWN").upper(),
+                "side": "BUY" if amt > 0 else "SELL",
+            }
+    except Exception:
+        pass
+    return None
+
+
+def init_futures_settings(client, symbol: str, leverage: int = LEVERAGE, margin_type: str = "ISOLATED", has_position: bool = False):
+    """啟動時設定槓桿與逐倉；若有持倉則不強制切換模式，僅記錄警告並繼續。"""
+    try:
+        if not has_position:
+            try:
+                client.set_margin_type(symbol=symbol, margin_type=margin_type)
+                time.sleep(0.3)
+            except Exception as e:
+                err_str = str(e)
+                if "No need to change margin type" in err_str:
+                    pass
+                else:
+                    print(f"  [WARN] set_margin_type 跳過或失敗（不中斷）: {err_str}")
         try:
-            client.set_margin_type(symbol=symbol, margin_type=margin_type)
+            client.set_leverage(symbol=symbol, leverage=leverage)
+            print(f"  [OK] {symbol} 槓桿={leverage}x, 保證金目標={margin_type}")
         except Exception as e:
-            if "No need to change margin type" not in str(e):
-                print(f"  [WARN] marginType: {e}")
-        time.sleep(0.3)
-        client.set_leverage(symbol=symbol, leverage=leverage)
-        print(f"  [OK] {symbol} 槓桿={leverage}x, 保證金={margin_type}")
+            print(f"  [WARN] set_leverage: {e}")
     except Exception as e:
-        print(f"  [ERR] init_futures_settings: {e}")
-        raise
+        print(f"  [WARN] init_futures_settings 非致命: {e}")
 
 
 def get_available_balance(client) -> float:
@@ -188,7 +214,7 @@ def place_market_order(client, symbol: str, side: str, quantity: float) -> dict 
 
 
 def place_stop_market_close(client, symbol: str, side: str, stop_price: float) -> dict | None:
-    """掛 STOP_MARKET 平倉（2% 硬止損）。Long 用 SELL 觸發，Short 用 BUY 觸發。"""
+    """掛 STOP_MARKET 平倉（2% 硬止損）。回傳含 orderId 的結果供 Telegram 顯示。"""
     try:
         close_side = "SELL" if side.upper() == "BUY" else "BUY"
         params = {
@@ -203,6 +229,19 @@ def place_stop_market_close(client, symbol: str, side: str, stop_price: float) -
     except Exception as e:
         print(f"  [ERR] place_stop_market_close: {e}")
         return None
+
+
+def get_margin_type_from_api(client, symbol: str) -> str:
+    """從倉位 API 讀取當前保證金模式（全倉/逐倉）。"""
+    try:
+        positions = client.get_position_risk(symbol=symbol)
+        for p in positions or []:
+            mt = (p.get("marginType") or "").strip().upper()
+            if mt:
+                return "逐倉" if mt == "ISOLATED" else "全倉"
+    except Exception:
+        pass
+    return "N/A"
 
 
 def append_signal_record(record: dict):
@@ -303,7 +342,8 @@ def run_once(client, telegram_notifier=None, last_summary_date: str = ""):
                 order = place_market_order(client, SYMBOL, signal.side, qty)
                 if order:
                     sl_price = signal.hard_stop_price
-                    stop_ok = place_stop_market_close(client, SYMBOL, signal.side, sl_price)
+                    stop_order = place_stop_market_close(client, SYMBOL, signal.side, sl_price)
+                    stop_order_id = stop_order.get("orderId") if stop_order else None
                     record = {
                         "time_utc": datetime.now(timezone.utc).isoformat(),
                         "bar_time": bar_time,
@@ -315,13 +355,22 @@ def run_once(client, telegram_notifier=None, last_summary_date: str = ""):
                         "regime": signal.regime,
                         "qty": qty,
                         "order_id": order.get("orderId"),
+                        "stop_order_id": stop_order_id,
                     }
                     append_signal_record(record)
-                    print(f"  [FILL] {signal.side} qty={qty} @ {signal.entry_price}  SL={sl_price}  orderId={order.get('orderId')}")
+                    print(f"  [FILL] {signal.side} qty={qty} @ {signal.entry_price}  SL={sl_price}  orderId={order.get('orderId')} stopOrderId={stop_order_id}")
                     if telegram_notifier and getattr(telegram_notifier, "send_message", None):
+                        margin_mode = get_margin_type_from_api(client, SYMBOL)
+                        fz = row.get("funding_z_score")
+                        rz = row.get("rsi_z_score")
+                        fz_str = round(float(fz), 2) if fz is not None and str(fz) != "nan" else "N/A"
+                        rz_str = round(float(rz), 2) if rz is not None and str(rz) != "nan" else "N/A"
                         telegram_notifier.send_message(
                             f"📊 <b>Testnet: {signal.side}</b>\n"
-                            f"Entry: {signal.entry_price} | SL: {sl_price} | qty: {qty}\nBar: {bar_time}"
+                            f"開倉模式: {margin_mode} | Entry: {signal.entry_price} | SL: {sl_price} | qty: {qty}\n"
+                            f"止損單 ID: {stop_order_id or 'N/A'}\n"
+                            f"3m Z-Score: FundingZ={fz_str} RSI_Z={rz_str}\n"
+                            f"Bar: {bar_time}"
                         )
                 else:
                     print(f"  [ERR] 市價單未成交")
@@ -343,10 +392,35 @@ def run_once(client, telegram_notifier=None, last_summary_date: str = ""):
     return 0, last_summary_date
 
 
+def trim_log_lines(log_path: Path, keep_lines: int = 10000) -> None:
+    """將日誌檔保留最近 keep_lines 行，避免塞爆磁碟。"""
+    if not log_path.exists():
+        return
+    try:
+        with open(log_path, "r", encoding="utf-8", errors="ignore") as f:
+            lines = f.readlines()
+        if len(lines) <= keep_lines:
+            return
+        with open(log_path, "w", encoding="utf-8") as f:
+            f.writelines(lines[-keep_lines:])
+        print(f"  [LOG] 已滾動 {log_path.name}，保留最近 {keep_lines} 行")
+    except Exception as e:
+        print(f"  [WARN] 日誌滾動跳過: {e}")
+
+
 def main():
     print("Futures Testnet 實戰啟動：每 3 分鐘掃描（3m 進場 + 1h EMA200），deploy_ready 邏輯，2% 硬止損")
+    ensure_log_dir()
+    trim_log_lines(LOG_DIR / "paper_out.log", 10000)
+    trim_log_lines(LOG_DIR / "paper_err.log", 10000)
+
     client = get_client()
-    init_futures_settings(client, SYMBOL, leverage=LEVERAGE, margin_type="ISOLATED")
+    position = get_position_info(client, SYMBOL)
+    if position:
+        print(f"  [現有持倉接管] {position['side']} 數量={position['positionAmt']} 開倉價={position['entryPrice']} 未實現盈虧={position['unrealizedProfit']} 保證金模式={position['marginType']}")
+        print("  將繼續追蹤，不重複開倉；2% 止損邏輯維持運作。")
+    init_futures_settings(client, SYMBOL, leverage=LEVERAGE, margin_type="ISOLATED", has_position=bool(position))
+
     telegram_notifier = _get_telegram_notifier()
     consecutive_fail = 0
     last_summary_date = ""
