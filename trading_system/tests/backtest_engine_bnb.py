@@ -57,11 +57,12 @@ class BacktestEngineBNB:
         market_data: pd.DataFrame,
         fee_bps: float = 9.0,
         slippage_bps: float = 5.0,
+        leverage: float = 1.0,
     ) -> Dict[str, Any]:
         """
         market_data: 1h OHLCV，會自動呼叫 add_factor_columns 補因子。
-        回傳: total_return_pct, sharpe, max_drawdown_pct, trades_count, trades_per_day_avg,
-              weekly_return_pct, profitable_after_fees, trades[], equity_curve
+        leverage: 合約槓桿倍數；淨利公式 Net = (Price_Change * Leverage) - (Entry_Fee + Exit_Fee)。
+        回傳: total_return_pct, sharpe, max_drawdown_pct, trades_count, ...
         """
         if market_data.empty or len(market_data) < 50:
             return self._empty_result("insufficient_data")
@@ -69,7 +70,7 @@ class BacktestEngineBNB:
         df = add_factor_columns(market_data.copy())
         signals_df = strategy.generate_signal(df)
 
-        fee_pct = fee_bps / 10000.0 * 2  # 往返
+        fee_pct = fee_bps / 10000.0 * 2  # 往返 Entry_Fee + Exit_Fee
         slippage_pct = slippage_bps / 10000.0 * 2
         cost_per_trade_pct = fee_pct + slippage_pct
 
@@ -137,7 +138,8 @@ class BacktestEngineBNB:
                 )
 
             direction = 1 if side == "BUY" else -1
-            gross_pct = (exit_price - entry_price) / entry_price * direction * 100
+            price_change_pct = (exit_price - entry_price) / entry_price * direction * 100
+            gross_pct = price_change_pct * leverage  # 合約: (Price_Change * Leverage) - (Entry_Fee + Exit_Fee)
             net_pct = gross_pct - (fee_pct + slippage_pct) * 100
 
             day_key = pd.Timestamp(entry_time).date() if hasattr(entry_time, "date") else pd.Timestamp(entry_time).normalize().date()

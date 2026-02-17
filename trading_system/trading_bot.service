@@ -1,5 +1,5 @@
 [Unit]
-Description=BNB/USDT Paper Run Monitor (paper_run.py)
+Description=BNB/USDT Futures Testnet (futures_run.py)
 After=network-online.target
 Wants=network-online.target
 
@@ -7,7 +7,7 @@ Wants=network-online.target
 Type=simple
 User=trader
 WorkingDirectory=/home/trader/trading_system
-ExecStart=/usr/bin/python3 -u -m bots.bot_c.paper_run
+ExecStart=/usr/bin/python3 -u -m bots.bot_c.futures_run
 Restart=always
 RestartSec=30
 StandardOutput=append:/home/trader/trading_system/logs/paper_out.log

@@ -34,6 +34,7 @@ DEPLOY_PARAMS = {
 }
 
 # 風控常數
+# 2% 硬止損 @ 3x 槓桿：單筆對本金傷害 = 2% × 3 × (margin/equity)；依 risk 0.25% 反推倉位時約 0.25% 本金
 HARD_STOP_POSITION_PCT = 2.0
 POSITION_SIZE = 0.02
 
@@ -106,6 +107,10 @@ def get_signal_from_row(row: Dict[str, Any], params: Optional[Dict[str, Any]] = 
 
     if close > ema200:
         regime = "bull"
+        # 資金費率過濾：多頭過熱時抑制做多以節省利息
+        funding_z = row.get("funding_z_score")
+        if funding_z is not None and isinstance(funding_z, (int, float)) and float(funding_z) > 0.5:
+            return None
         z_thresh = p.get("funding_z_long", LONG_Z_THRESH)
         min_score = int(p.get("min_score_long", LONG_MIN_SCORE))
         score = _vote_score_long(row, z_thresh)

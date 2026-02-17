@@ -29,6 +29,10 @@ LOG_DIR = ROOT / "logs"
 PAPER_SIGNALS_FILE = LOG_DIR / "paper_signals.json"
 HEARTBEAT_FILE = LOG_DIR / "paper_last_heartbeat.txt"
 SYMBOL = "BNBUSDT"
+# 合約成本：Net_Profit = (Price_Change * Leverage) - (Entry_Fee + Exit_Fee)
+LEVERAGE = 3
+FEE_MAKER_PCT = 0.02   # 0.02%
+FEE_TAKER_PCT = 0.04   # 0.04%
 
 
 def load_signals():
@@ -78,11 +82,15 @@ def main():
         side = (last.get("side") or "").upper()
         if entry and entry > 0:
             if side == "BUY":
-                pct = (current_price - entry) / entry * 100
+                price_change_pct = (current_price - entry) / entry * 100
             else:
-                pct = (entry - current_price) / entry * 100
+                price_change_pct = (entry - current_price) / entry * 100
+            # Net = (Price_Change * Leverage) - (Entry_Fee + Exit_Fee); 進出場皆以 Taker 估
+            gross_pct = price_change_pct * LEVERAGE
+            round_trip_fee_pct = 2 * FEE_TAKER_PCT
+            net_pct = gross_pct - round_trip_fee_pct
             bar_time = last.get("bar_time", "?")
-            print(f"浮動盈虧 (最後持倉 {bar_time} {side} @ {entry}): {pct:+.2f}%")
+            print(f"浮動盈虧 (最後持倉 {bar_time} {side} @ {entry}): 價格 {price_change_pct:+.2f}% | 淨(含槓桿{LEVERAGE}x與手續費): {net_pct:+.2f}%")
         else:
             print("浮動盈虧: 無法計算 (entry_price 無效)")
     else:
