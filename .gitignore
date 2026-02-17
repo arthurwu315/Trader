@@ -29,6 +29,7 @@ build/
 **/tests/.cache/
 **/.cache/
 **/tests/logs/*.json
+**/logs/*.json
 *.swo
 *.swp
 
