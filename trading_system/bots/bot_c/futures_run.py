@@ -499,8 +499,9 @@ def run_once(client, telegram_notifier=None, last_summary_date: str = "", last_p
     current_amt = pos["positionAmt"] if pos else 0.0
     if last_position_amt != 0 and current_amt == 0:
         try:
-            entry_time_tw = _now_taiwan().strftime("%Y-%m-%d %H:%M:%S")
-            exit_time_tw = entry_time_tw
+            time.sleep(2)
+            exit_time_tw = _now_taiwan().strftime("%Y-%m-%d %H:%M:%S")
+            entry_time_tw = exit_time_tw
             records = []
             if SIGNALS_FILE.exists():
                 with open(SIGNALS_FILE, "r", encoding="utf-8") as f:
@@ -515,16 +516,35 @@ def run_once(client, telegram_notifier=None, last_summary_date: str = "", last_p
                 side = (last_rec.get("side") or "").upper()
                 qty = float(last_rec.get("qty", 0) or 0)
                 entry_price = float(last_rec.get("entry_price", 0) or 0)
+                exit_price = entry_price
+                try:
+                    trades = client.get_user_trades(SYMBOL, limit=10)
+                    if trades:
+                        latest = trades[-1]
+                        exit_price = float(latest.get("price", 0) or 0)
+                except Exception:
+                    pass
                 realized, funding, commission = _get_recent_income_for_close(client, SYMBOL)
                 pnl_usdt = realized + funding
                 fees = commission
-                pnl_pct = (pnl_usdt / (entry_price * qty) * 100) if (entry_price and qty) else 0.0
-                exit_price = entry_price
+                if entry_price and qty:
+                    pnl_pct = (pnl_usdt / (entry_price * qty) * 100)
+                else:
+                    pnl_pct = 0.0
                 append_trade_history_row(
                     entry_time_tw, exit_time_tw, side, qty, entry_price, exit_price,
                     pnl_usdt, pnl_pct, fees, funding,
                 )
-                print(f"  [帳本] 平倉已寫入 trade_history.csv | PnL {pnl_usdt:+.2f} USDT")
+                print(f"  [帳本] 平倉已寫入 trade_history.csv | 出場價 {exit_price} | PnL {pnl_usdt:+.2f} USDT")
+                if telegram_notifier and getattr(telegram_notifier, "send_message", None):
+                    try:
+                        telegram_notifier.send_message(
+                            f"🚨 <b>【平倉通知】</b> 趨勢反轉或觸發止損！\n"
+                            f"出場價：{exit_price}\n"
+                            f"預估損益：{pnl_usdt:+.2f} USDT"
+                        )
+                    except Exception as tg_err:
+                        print(f"  [WARN] 平倉 Telegram 發送失敗: {tg_err}")
         except Exception as e:
             print(f"  [WARN] 平倉寫入帳本失敗: {e}")
     from bots.bot_c.deploy_ready import get_signal_from_row, get_deploy_params, HARD_STOP_POSITION_PCT

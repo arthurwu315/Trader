@@ -330,6 +330,10 @@ class BinanceFuturesClient:
             params["symbol"] = symbol
         return self._call_with_retry("GET", "/fapi/v1/income", params, signed=True)
 
+    def get_user_trades(self, symbol: str, limit: int = 30) -> list:
+        """獲取帳戶成交紀錄（含價格、realizedPnl），用於平倉時取得真實出場價。"""
+        return self._call_with_retry("GET", "/fapi/v1/userTrades", {"symbol": symbol, "limit": limit}, signed=True)
+
     # ===== Compatibility aliases for execution_safety =====
 
     def futures_create_order(self, **params):
