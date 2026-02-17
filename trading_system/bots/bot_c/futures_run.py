@@ -51,8 +51,10 @@ LOOKBACK_FILTER = 220 # 1h：足夠 EMA200(200)+Z-Score 168
 TESTNET_URL = "https://testnet.binancefuture.com"
 LOG_DIR = ROOT / "logs"
 SIGNALS_FILE = LOG_DIR / "paper_signals.json"
+TRADE_HISTORY_CSV = LOG_DIR / "trade_history.csv"
 HEARTBEAT_FILE = LOG_DIR / "paper_last_heartbeat.txt"
 DISCONNECT_ALERT_FILE = LOG_DIR / "paper_disconnect_alert.log"
+TRADE_HISTORY_HEADER = "entry_time_tw,exit_time_tw,side,qty,entry_price,exit_price,pnl_usdt,pnl_pct,fees,funding"
 CONSECUTIVE_FAIL_THRESHOLD = 3
 LOOP_SLEEP_SEC = 180  # 每 3 分鐘一輪
 HARD_STOP_PCT = 2.0   # 2% 硬止損
@@ -275,6 +277,56 @@ def append_signal_record(record: dict):
         json.dump(records, f, indent=2, ensure_ascii=False)
 
 
+def _get_recent_income_for_close(client, symbol: str, limit: int = 30) -> tuple[float, float, float]:
+    """取得最近一筆平倉相關的已實現盈虧、手續費、資金費（供寫入 trade_history）。"""
+    try:
+        items = client.get_income_history(symbol=symbol, limit=limit)
+        realized, funding, commission = 0.0, 0.0, 0.0
+        now_ms = int(time.time() * 1000)
+        for x in (items or []):
+            if x.get("asset") != "USDT":
+                continue
+            t = int(x.get("time", 0) or 0)
+            if now_ms - t > 60000 * 10:  # 只取 10 分鐘內
+                continue
+            inc = float(x.get("income", 0) or 0)
+            it = x.get("incomeType", "")
+            if it == "REALIZED_PNL":
+                realized += inc
+            elif it == "FUNDING_FEE":
+                funding += inc
+            elif it == "COMMISSION":
+                commission += inc
+        return realized, funding, commission
+    except Exception:
+        pass
+    return 0.0, 0.0, 0.0
+
+
+def append_trade_history_row(
+    entry_time_tw: str,
+    exit_time_tw: str,
+    side: str,
+    qty: float,
+    entry_price: float,
+    exit_price: float,
+    pnl_usdt: float,
+    pnl_pct: float,
+    fees: float,
+    funding: float,
+):
+    """平倉時追加一筆到 trade_history.csv（永恆帳本）。"""
+    ensure_log_dir()
+    write_header = not TRADE_HISTORY_CSV.exists()
+    try:
+        with open(TRADE_HISTORY_CSV, "a", encoding="utf-8", newline="") as f:
+            if write_header:
+                f.write(TRADE_HISTORY_HEADER + "\n")
+            f.write(f"{entry_time_tw},{exit_time_tw},{side},{qty},{entry_price},{exit_price},{pnl_usdt:.2f},{pnl_pct:.2f},{fees:.2f},{funding:.2f}\n")
+    except Exception as e:
+        print(f"  [WARN] append_trade_history 失敗: {e}")
+
+
 def _write_heartbeat(now_iso: str):
     ensure_log_dir()
     try:
@@ -326,6 +378,26 @@ def _get_daily_realized_pnl(client, symbol: str, hours: int = 24) -> float:
     return 0.0
 
 
+def _get_daily_commission(client, symbol: str, hours: int = 24) -> float:
+    """過去 hours 小時內手續費合計。失敗回傳 0，不拋錯。"""
+    try:
+        cutoff_ms = int(time.time() * 1000) - hours * 3600 * 1000
+        items = client.get_income_history(symbol=symbol, limit=500)
+        total = 0.0
+        for x in items or []:
+            if x.get("asset") != "USDT":
+                continue
+            if x.get("incomeType") != "COMMISSION":
+                continue
+            if int(x.get("time", 0) or 0) < cutoff_ms:
+                continue
+            total += float(x.get("income", 0) or 0)
+        return total
+    except Exception:
+        pass
+    return 0.0
+
+
 def _send_daily_summary(client, notifier, last_sent_date: str) -> str:
     """每日實戰總結：API 總餘額、昨日盈虧、持倉浮動 + 本地訊號統計。觸發為台灣時間 8 點。"""
     from datetime import date, timedelta
@@ -341,10 +413,12 @@ def _send_daily_summary(client, notifier, last_sent_date: str) -> str:
 
     balance = 0.0
     daily_pnl = 0.0
+    daily_fees = 0.0
     position_info = get_position_info(client, SYMBOL)
     try:
         balance = _get_wallet_balance_usdt(client)
         daily_pnl = _get_daily_realized_pnl(client, SYMBOL, hours=24)
+        daily_fees = _get_daily_commission(client, SYMBOL, hours=24)
     except Exception as e:
         print(f"  [WARN] 每日總結 API 取得失敗（不中斷）: {e}")
 
@@ -391,6 +465,7 @@ def _send_daily_summary(client, notifier, last_sent_date: str) -> str:
         "💰 <b>帳戶狀態</b>\n"
         f"總餘額：{balance:.2f} USDT\n"
         f"昨日盈虧：{daily_pnl:+.2f} USDT ({pnl_pct:+.2f}%)\n"
+        f"昨日手續費：{daily_fees:.2f} USDT\n"
         "📈 <b>交易統計</b>\n"
         f"昨日訊號：{count} 筆\n"
         f"累計總筆數：{total_count} (多:{longs} / 空:{shorts})\n"
@@ -414,11 +489,44 @@ def send_disconnect_alert():
     sys.stderr.write(msg)
 
 
-def run_once(client, telegram_notifier=None, last_summary_date: str = ""):
+def run_once(client, telegram_notifier=None, last_summary_date: str = "", last_position_amt: float = 0.0):
     merged, r1h, r3m = fetch_merged_row(client)
     if merged is None:
-        return 1, last_summary_date
+        return 1, last_summary_date, last_position_amt
     row = merged
+    # 持倉狀態（用於偵測平倉並寫入 trade_history.csv）
+    pos = get_position_info(client, SYMBOL)
+    current_amt = pos["positionAmt"] if pos else 0.0
+    if last_position_amt != 0 and current_amt == 0:
+        try:
+            entry_time_tw = _now_taiwan().strftime("%Y-%m-%d %H:%M:%S")
+            exit_time_tw = entry_time_tw
+            records = []
+            if SIGNALS_FILE.exists():
+                with open(SIGNALS_FILE, "r", encoding="utf-8") as f:
+                    records = json.load(f)
+            if isinstance(records, list) and records:
+                last_rec = records[-1]
+                entry_ts = last_rec.get("time_utc") or ""
+                if entry_ts:
+                    from datetime import datetime as dt_parse
+                    t = dt_parse.fromisoformat(entry_ts.replace("Z", "+00:00"))
+                    entry_time_tw = t.astimezone(TZ_TAIWAN).strftime("%Y-%m-%d %H:%M:%S")
+                side = (last_rec.get("side") or "").upper()
+                qty = float(last_rec.get("qty", 0) or 0)
+                entry_price = float(last_rec.get("entry_price", 0) or 0)
+                realized, funding, commission = _get_recent_income_for_close(client, SYMBOL)
+                pnl_usdt = realized + funding
+                fees = commission
+                pnl_pct = (pnl_usdt / (entry_price * qty) * 100) if (entry_price and qty) else 0.0
+                exit_price = entry_price
+                append_trade_history_row(
+                    entry_time_tw, exit_time_tw, side, qty, entry_price, exit_price,
+                    pnl_usdt, pnl_pct, fees, funding,
+                )
+                print(f"  [帳本] 平倉已寫入 trade_history.csv | PnL {pnl_usdt:+.2f} USDT")
+        except Exception as e:
+            print(f"  [WARN] 平倉寫入帳本失敗: {e}")
     from bots.bot_c.deploy_ready import get_signal_from_row, get_deploy_params, HARD_STOP_POSITION_PCT
     signal = get_signal_from_row(row, get_deploy_params())
     hard_stop_pct = HARD_STOP_POSITION_PCT
@@ -426,7 +534,7 @@ def run_once(client, telegram_notifier=None, last_summary_date: str = ""):
     if signal and signal.should_enter:
         ts = row.get("timestamp")
         bar_time = ts.isoformat() if hasattr(ts, "isoformat") else str(ts)
-        if has_open_position(client, SYMBOL):
+        if current_amt != 0:
             print(f"  [SKIP] 已有持倉，本根不重複下單")
         else:
             balance = get_available_balance(client)
@@ -484,7 +592,7 @@ def run_once(client, telegram_notifier=None, last_summary_date: str = ""):
     sig_str = signal.side if (signal and signal.should_enter) else None
     ema_str = ema200 if ema200 is not None else "N/A"
     print(f"[Heartbeat 每3分鐘] {now} - Price: {price} | FundingZ: {fz_str} RSI_Z: {rz_str} | EMA200: {ema_str} Regime: {regime} | Signal: {sig_str}")
-    return 0, last_summary_date
+    return 0, last_summary_date, current_amt
 
 
 def trim_log_lines(log_path: Path, keep_lines: int = 10000) -> None:
@@ -519,9 +627,14 @@ def main():
     telegram_notifier = _get_telegram_notifier()
     consecutive_fail = 0
     last_summary_date = ""
+    last_position_amt = 0.0
+    if position:
+        last_position_amt = position["positionAmt"]
     while True:
         try:
-            consecutive_fail, last_summary_date = run_once(client, telegram_notifier, last_summary_date)
+            consecutive_fail, last_summary_date, last_position_amt = run_once(
+                client, telegram_notifier, last_summary_date, last_position_amt
+            )
             if consecutive_fail >= CONSECUTIVE_FAIL_THRESHOLD:
                 send_disconnect_alert()
                 consecutive_fail = 0

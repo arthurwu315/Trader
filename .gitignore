@@ -30,6 +30,10 @@ build/
 **/.cache/
 **/tests/logs/*.json
 **/logs/*.json
+!trading_system/logs/paper_signals.json
+!trading_system/logs/trade_history.csv
+*.tar.gz
+trading_system/old_logs_backup.tar.gz
 *.swo
 *.swp
 
