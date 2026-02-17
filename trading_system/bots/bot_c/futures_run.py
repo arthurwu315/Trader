@@ -19,13 +19,9 @@ sys.path.insert(0, str(ROOT))
 
 try:
     from dotenv import load_dotenv
-    _bot_dir = Path(__file__).resolve().parent
-    _env_live = _bot_dir / ".env.c_live"
-    _env_testnet = _bot_dir / ".env.c_testnet"
-    if os.getenv("MODE") == "LIVE" and _env_live.exists():
-        load_dotenv(dotenv_path=_env_live)
-    elif _env_testnet.exists():
-        load_dotenv(dotenv_path=_env_testnet)
+    _env_root = ROOT / ".env"
+    if _env_root.exists():
+        load_dotenv(dotenv_path=_env_root)
 except Exception:
     pass
 

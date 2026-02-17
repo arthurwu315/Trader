@@ -1,0 +1,15 @@
+# 忽略所有環境變數檔案 (金鑰)
+.env
+.env.*
+bots/**/.env*
+
+# 忽略日誌、數據與快取
+*.log
+logs/
+*.db
+db/
+__pycache__/
+
+# 忽略系統操作紀錄
+.DS_Store
+.lesshst
