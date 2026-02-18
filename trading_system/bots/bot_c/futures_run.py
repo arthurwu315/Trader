@@ -1,8 +1,9 @@
 """
-Binance Futures Testnet 實戰腳本（3 分鐘對齊回測）
-- 每 3 分鐘掃描：3m K 線用於 Z-Score/進場訊號，1h K 線用於 EMA200 牛熊過濾
+Binance Futures Testnet 實戰腳本（1h 決策對齊 Calmar 13.9 回測）
+- 決策週期 1h：進場訊號僅在每根 1h K 線收盤後評估（與回測一致）
+- 數據源：ATR / SL / TP / price_breakout / Z-Score / EMA200 均來自 1h，不混用 3m
+- Heartbeat 每 3 分鐘輸出一次，僅監控價格與連線，不觸發開倉/平倉
 - 有訊號時於 Testnet 下 MARKET 單並掛 STOP_MARKET（2% 硬止損）
-- 啟動時自動設定 3x 槓桿、逐倉 (ISOLATED)
 - 使用 Testnet: https://testnet.binancefuture.com
 """
 from __future__ import annotations
@@ -43,11 +44,14 @@ except Exception:
     pass
 
 SYMBOL = "BNBUSDT"
-# 多時區：進場用 3m，牛熊過濾用 1h（EMA200）
-INTERVAL_ENTRY = "3m"
+# 決策週期 1h（與回測 Calmar 13.9 一致）：進場/止損/止盈/breakout 全用 1h
+INTERVAL_ENTRY = "1h"
 INTERVAL_FILTER = "1h"
-LOOKBACK_ENTRY = 80   # 3m：足夠 atr(14)+breakout(20)，不重複拉大量
-LOOKBACK_FILTER = 220 # 1h：足夠 EMA200(200)+Z-Score 168
+LOOKBACK_ENTRY = 220  # 1h：足夠 EMA200(200)+Z-Score(168)+ATR(14)+breakout(20)
+LOOKBACK_FILTER = 220
+# 僅在每小時 0–9 分內才評估進場（對應上一根 1h 收盤）
+DECISION_WINDOW_START_MIN = 0
+DECISION_WINDOW_END_MIN = 9
 TESTNET_URL = "https://testnet.binancefuture.com"
 LOG_DIR = ROOT / "logs"
 SIGNALS_FILE = LOG_DIR / "paper_signals.json"
@@ -101,35 +105,38 @@ def add_factors(df):
     return add_factor_columns(df)
 
 
+def _minutes_to_next_1h_close() -> int:
+    """距離下一根 1h K 線收盤還剩幾分鐘（UTC）。"""
+    now = datetime.now(timezone.utc)
+    return 60 - now.minute - (1 if now.second >= 30 else 0)
+
+
 def fetch_merged_row(client, symbol: str = SYMBOL):
     """
-    多時區同步：3m 進場訊號 + 1h 牛熊過濾。
-    - 1h: EMA200、Funding Z、RSI Z（僅拉 LOOKBACK_FILTER 根）
-    - 3m: close、atr、price_breakout（僅拉 LOOKBACK_ENTRY 根）
-    回傳合併後的最後一根 row，供 get_signal_from_row 使用；失敗回傳 None。
+    1h 決策模式：所有進場/止損/止盈/breakout/Z-Score/EMA200 均來自 1h K 線。
+    回傳 (merged_last_closed, r1h_current, minutes_to_1h)。
+    - merged_last_closed: 上一根「已收盤」的 1h row，供訊號判定（與回測一致）
+    - r1h_current: 當前 1h 根（可能未收盤），供 heartbeat 顯示
+    - minutes_to_1h: 距離下一根 1h 收盤還剩幾分
     """
-    df_1h = fetch_klines(client, symbol, INTERVAL_FILTER, LOOKBACK_FILTER)
+    df_1h = fetch_klines(client, symbol, INTERVAL_ENTRY, LOOKBACK_ENTRY)
     if df_1h is None or len(df_1h) < 200:
         return None, None, None
-    df_3m = fetch_klines(client, symbol, INTERVAL_ENTRY, LOOKBACK_ENTRY)
-    if df_3m is None or len(df_3m) < 20:
-        return None, None, None
     df_1h = add_factors(df_1h)
-    df_3m = add_factors(df_3m)
-    r1 = df_1h.iloc[-1].to_dict()
-    r3 = df_3m.iloc[-1].to_dict()
-    # 進場價/止損用 3m close、atr；牛熊與 Z-Score 用 1h
-    merged = {
-        "close": r3["close"],
-        "ema_200": r1["ema_200"],
-        "atr": r3["atr"],
-        "funding_z_score": r1.get("funding_z_score", 0),
-        "rsi_z_score": r1.get("rsi_z_score", 0),
-        "price_breakout_long": r3.get("price_breakout_long", 0),
-        "price_breakout_short": r3.get("price_breakout_short", 0),
-        "timestamp": r3["timestamp"],
+    # 上一根已收盤的 1h（回測同邏輯：在 bar 收盤時做決策）
+    r_last_closed = df_1h.iloc[-2].to_dict() if len(df_1h) >= 2 else df_1h.iloc[-1].to_dict()
+    r_current = df_1h.iloc[-1].to_dict()
+    merged_last_closed = {
+        "close": r_last_closed["close"],
+        "ema_200": r_last_closed.get("ema_200"),
+        "atr": r_last_closed["atr"],
+        "funding_z_score": r_last_closed.get("funding_z_score", 0),
+        "rsi_z_score": r_last_closed.get("rsi_z_score", 0),
+        "price_breakout_long": r_last_closed.get("price_breakout_long", 0),
+        "price_breakout_short": r_last_closed.get("price_breakout_short", 0),
+        "timestamp": r_last_closed["timestamp"],
     }
-    return merged, r1, r3
+    return merged_last_closed, r_current, _minutes_to_next_1h_close()
 
 
 def ensure_log_dir():
@@ -490,10 +497,15 @@ def send_disconnect_alert():
 
 
 def run_once(client, telegram_notifier=None, last_summary_date: str = "", last_position_amt: float = 0.0):
-    merged, r1h, r3m = fetch_merged_row(client)
-    if merged is None:
+    merged, r1h_current, minutes_to_1h = fetch_merged_row(client)
+    if merged is None or r1h_current is None:
         return 1, last_summary_date, last_position_amt
     row = merged
+    in_decision_window = (
+        DECISION_WINDOW_END_MIN is not None
+        and datetime.now(timezone.utc).minute >= DECISION_WINDOW_START_MIN
+        and datetime.now(timezone.utc).minute <= DECISION_WINDOW_END_MIN
+    )
     # 持倉狀態（用於偵測平倉並寫入 trade_history.csv）
     pos = get_position_info(client, SYMBOL)
     current_amt = pos["positionAmt"] if pos else 0.0
@@ -548,10 +560,11 @@ def run_once(client, telegram_notifier=None, last_summary_date: str = "", last_p
         except Exception as e:
             print(f"  [WARN] 平倉寫入帳本失敗: {e}")
     from bots.bot_c.deploy_ready import get_signal_from_row, get_deploy_params, HARD_STOP_POSITION_PCT
-    signal = get_signal_from_row(row, get_deploy_params())
+    # 僅在 1h 收盤後之決策窗口內評估進場（與回測一致）
+    signal = get_signal_from_row(row, get_deploy_params()) if in_decision_window else None
     hard_stop_pct = HARD_STOP_POSITION_PCT
 
-    if signal and signal.should_enter:
+    if in_decision_window and signal and signal.should_enter:
         ts = row.get("timestamp")
         bar_time = ts.isoformat() if hasattr(ts, "isoformat") else str(ts)
         if current_amt != 0:
@@ -592,7 +605,7 @@ def run_once(client, telegram_notifier=None, last_summary_date: str = "", last_p
                             f"📊 <b>Testnet: {signal.side}</b>\n"
                             f"開倉模式: {margin_mode} | Entry: {signal.entry_price} | SL: {sl_price} | qty: {qty}\n"
                             f"止損單 ID: {stop_order_id or 'N/A'}\n"
-                            f"3m Z-Score: FundingZ={fz_str} RSI_Z={rz_str}\n"
+                            f"1h Z-Score: FundingZ={fz_str} RSI_Z={rz_str}\n"
                             f"Bar: {bar_time}"
                         )
                 else:
@@ -601,7 +614,13 @@ def run_once(client, telegram_notifier=None, last_summary_date: str = "", last_p
     last_summary_date = _send_daily_summary(client, telegram_notifier, last_summary_date)
     now = _now_taiwan().strftime("%Y-%m-%d %H:%M:%S")
     _write_heartbeat(datetime.now(timezone.utc).isoformat())
-    price = round(float(row.get("close", 0)), 2)
+    # Heartbeat 用當前價（優先 3m 最後收盤價以每 3 分鐘更新，僅監控用）
+    try:
+        df_3m = fetch_klines(client, SYMBOL, "3m", 2)
+        price = round(float(df_3m.iloc[-1]["close"]), 2) if df_3m is not None and len(df_3m) else round(float(r1h_current.get("close", 0)), 2)
+    except Exception:
+        price = round(float(r1h_current.get("close", 0)), 2)
+    mins_left = minutes_to_1h if minutes_to_1h is not None else _minutes_to_next_1h_close()
     ema200_raw = row.get("ema_200")
     ema200 = round(float(ema200_raw), 2) if ema200_raw is not None and str(ema200_raw) != "nan" else None
     regime = "Bull" if (ema200 is not None and price > ema200) else ("Bear" if ema200 is not None else "N/A")
@@ -609,9 +628,9 @@ def run_once(client, telegram_notifier=None, last_summary_date: str = "", last_p
     rz = row.get("rsi_z_score")
     fz_str = round(float(fz), 2) if fz is not None and str(fz) != "nan" else "N/A"
     rz_str = round(float(rz), 2) if rz is not None and str(rz) != "nan" else "N/A"
-    sig_str = signal.side if (signal and signal.should_enter) else None
+    sig_str = signal.side if (in_decision_window and signal and signal.should_enter) else None
     ema_str = ema200 if ema200 is not None else "N/A"
-    print(f"[Heartbeat 每3分鐘] {now} - Price: {price} | FundingZ: {fz_str} RSI_Z: {rz_str} | EMA200: {ema_str} Regime: {regime} | Signal: {sig_str}")
+    print(f"[1h 決策模式] 當前價格: {price} | 距離下一根 1h 收盤還剩: {mins_left} 分 | FundingZ: {fz_str} RSI_Z: {rz_str} | EMA200: {ema_str} Regime: {regime} | Signal: {sig_str}")
     return 0, last_summary_date, current_amt
 
 
@@ -632,7 +651,7 @@ def trim_log_lines(log_path: Path, keep_lines: int = 10000) -> None:
 
 
 def main():
-    print("Futures Testnet 實戰啟動：每 3 分鐘掃描（3m 進場 + 1h EMA200），deploy_ready 邏輯，2% 硬止損")
+    print("Futures Testnet 實戰啟動：1h 決策模式（對齊 Calmar 13.9 回測），每小時 0–9 分評估進場，Heartbeat 每 3 分鐘，2% 硬止損")
     ensure_log_dir()
     trim_log_lines(LOG_DIR / "paper_out.log", 10000)
     trim_log_lines(LOG_DIR / "paper_err.log", 10000)
