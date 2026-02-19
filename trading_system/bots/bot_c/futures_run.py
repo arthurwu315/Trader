@@ -52,7 +52,10 @@ LOOKBACK_FILTER = 220
 # 僅在每小時 0–9 分內才評估進場（對應上一根 1h 收盤）
 DECISION_WINDOW_START_MIN = 0
 DECISION_WINDOW_END_MIN = 9
+# 實盤上線時設為 False；Testnet 測試時設為 True
+TESTNET = False
 TESTNET_URL = "https://testnet.binancefuture.com"
+MAINNET_URL = "https://fapi.binance.com"
 LOG_DIR = ROOT / "logs"
 SIGNALS_FILE = LOG_DIR / "paper_signals.json"
 TRADE_HISTORY_CSV = LOG_DIR / "trade_history.csv"
@@ -72,7 +75,7 @@ def get_client():
     from bots.bot_c.config_c import get_strategy_c_config
     from core.binance_client import BinanceFuturesClient
     cfg = get_strategy_c_config()
-    base = os.getenv("BINANCE_BASE_URL", TESTNET_URL)
+    base = os.getenv("BINANCE_BASE_URL", MAINNET_URL if not TESTNET else TESTNET_URL)
     return BinanceFuturesClient(
         base_url=base,
         api_key=cfg.binance_api_key or "dummy",
