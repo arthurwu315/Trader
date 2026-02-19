@@ -125,7 +125,7 @@ class ConfigStrategyC:
     
     # ==================== 資料週期 ====================
     tf_filter: str = "15m"
-    tf_entry: str = "3m"
+    tf_entry: str = "1h"
     lookback_filter: int = 200
     lookback_entry: int = 300
     
@@ -216,7 +216,7 @@ class ConfigStrategyC:
         if not self.binance_api_key:
             errors.append("❌ BINANCE_API_KEY 未設置 (testnet模式必須設置)")
         else:
-            print(f"   ✅ TESTNET Key已設置 ({self.binance_api_key[:8]}...)")
+            print(f"   ✅ MAINNET Key已設置 ({self.binance_api_key[:8]}...)")
         
         # 3. 交易節流
         print(f"\n3. 交易節流:")
@@ -248,6 +248,7 @@ class ConfigStrategyC:
         print(f"\n6. 資料週期:")
         print(f"   過濾週期: {self.tf_filter}")
         print(f"   進場週期: {self.tf_entry}")
+        print(f"   決策窗口: 每小時 00-09 分")
         print(f"   過濾回看: {self.lookback_filter}根")
         print(f"   進場回看: {self.lookback_entry}根")
         
