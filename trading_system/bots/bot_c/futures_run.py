@@ -72,6 +72,14 @@ HARD_STOP_PCT = 2.0   # 2% 硬止損
 LEVERAGE = 3
 RISK_PCT_OF_EQUITY = 0.0025  # 0.25% 風險
 MAX_CONCURRENT = 2
+NOTIONAL_PCT_OF_EQUITY = 0.50
+LEVERAGE_WARN_THRESHOLD = 1.5
+FUNDING_ALERT_RATE = 0.0005      # 0.05% / 8h
+FUNDING_SHORT_SKIP_ANNUAL = 0.20 # 做空年化資費 > 20% 則跳過
+SPREAD_ALERT_PCT = 0.15
+CIRCUIT_DRAWDOWN_PCT = 20.0
+CIRCUIT_COOLDOWN_HOURS = 48
+RISK_STATE_FILE = LOG_DIR / "paper_risk_state.json"
 # 每日總結觸發小時（目前=7 為測試用，驗證通知後請改回 8）
 SUMMARY_TRIGGER_HOUR = 8
 
@@ -373,6 +381,81 @@ def _get_wallet_balance_usdt(client) -> float:
     return 0.0
 
 
+def _get_total_equity_usdt(client) -> float:
+    """總淨值（Wallet + Unrealized PnL）。"""
+    try:
+        acc = client.get_account()
+        wallet = float(acc.get("totalWalletBalance", 0) or 0)
+        upnl = float(acc.get("totalUnrealizedProfit", 0) or 0)
+        return wallet + upnl
+    except Exception:
+        return _get_wallet_balance_usdt(client)
+
+
+def _get_total_open_notional_usdt(client) -> float:
+    """當前所有持倉名目總和。"""
+    total = 0.0
+    try:
+        positions = client.get_position_risk()
+        for p in positions or []:
+            amt = float(p.get("positionAmt", 0) or 0)
+            if amt == 0:
+                continue
+            mark = float(p.get("markPrice", 0) or 0)
+            total += abs(amt * mark)
+    except Exception:
+        pass
+    return total
+
+
+def _compute_qty_by_notional(equity_usdt: float, entry_price: float, notional_pct: float = NOTIONAL_PCT_OF_EQUITY) -> float:
+    if equity_usdt <= 0 or entry_price <= 0:
+        return 0.0
+    notional = equity_usdt * notional_pct
+    return round(notional / entry_price, 3)
+
+
+def _get_funding_rate(client, symbol: str) -> float:
+    """回傳最新 funding rate（每 8 小時）。"""
+    try:
+        out = client._call_with_retry("GET", "/fapi/v1/premiumIndex", {"symbol": symbol})
+        return float(out.get("lastFundingRate", 0) or 0)
+    except Exception:
+        return 0.0
+
+
+def _get_spread_pct(client, symbol: str) -> float:
+    """回傳即時 spread 百分比。"""
+    try:
+        t = client.get_24h_ticker(symbol)
+        bid = float(t.get("bidPrice", 0) or 0)
+        ask = float(t.get("askPrice", 0) or 0)
+        mid = (bid + ask) / 2.0
+        if mid <= 0:
+            return 0.0
+        return (ask - bid) / mid * 100.0
+    except Exception:
+        return 0.0
+
+
+def _load_risk_state() -> dict:
+    if not RISK_STATE_FILE.exists():
+        return {}
+    try:
+        data = json.loads(RISK_STATE_FILE.read_text(encoding="utf-8"))
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+
+def _save_risk_state(state: dict) -> None:
+    try:
+        RISK_STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
+        RISK_STATE_FILE.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
+    except Exception:
+        pass
+
+
 def _get_daily_realized_pnl(client, symbol: str, hours: int = 24) -> float:
     """過去 hours 小時內已實現盈虧 + 資金費。失敗回傳 0，不拋錯。"""
     try:
@@ -531,6 +614,62 @@ def _count_open_positions(client) -> int:
     return total
 
 
+def _refresh_circuit_state(state: dict, equity: float, now_utc: datetime) -> dict:
+    month_key = now_utc.strftime("%Y-%m")
+    if state.get("month_key") != month_key:
+        state["month_key"] = month_key
+        state["month_peak_equity"] = equity
+    peak = float(state.get("month_peak_equity", equity) or equity)
+    if equity > peak:
+        peak = equity
+        state["month_peak_equity"] = equity
+    drawdown_pct = ((peak - equity) / peak * 100.0) if peak > 0 else 0.0
+    state["latest_drawdown_pct"] = drawdown_pct
+    until = state.get("circuit_until_utc", "")
+    active = False
+    if until:
+        try:
+            active = now_utc < datetime.fromisoformat(until.replace("Z", "+00:00"))
+        except Exception:
+            active = False
+    if drawdown_pct >= CIRCUIT_DRAWDOWN_PCT and not active:
+        until_dt = now_utc + timedelta(hours=CIRCUIT_COOLDOWN_HOURS)
+        state["circuit_until_utc"] = until_dt.isoformat()
+        state["circuit_triggered_at_utc"] = now_utc.isoformat()
+        state["circuit_last_alert_date"] = now_utc.date().isoformat()
+        active = True
+    state["circuit_active"] = active
+    return state
+
+
+def _send_macro_control_report(
+    notifier,
+    report_date: str,
+    equity: float,
+    equity_change_pct: float,
+    top3: list[str],
+    decision: str,
+    warnings: list[str],
+    real_leverage: float,
+) -> None:
+    if not notifier or not getattr(notifier, "send_message", None):
+        return
+    warn_txt = "；".join(warnings) if warnings else "無"
+    msg = (
+        "📊 <b>[1D Macro 實盤報告]</b>\n"
+        f"📅 日期: {report_date}\n"
+        f"💰 當前淨值: {equity:.2f} USDT ({equity_change_pct:+.2f}%)\n"
+        f"🎯 RS 候選名單: {', '.join(top3) if top3 else 'None'}\n"
+        f"🛡️ 決策結果: {decision}\n"
+        f"📐 真實槓桿率: {real_leverage:.2f}x\n"
+        f"⚠️ 異常提醒: {warn_txt}"
+    )
+    try:
+        notifier.send_message(msg)
+    except Exception as e:
+        print(f"  [WARN] Telegram 中控報告發送失敗: {e}")
+
+
 def run_once(client, telegram_notifier=None, last_summary_date: str = "", last_scan_date: str = ""):
     from bots.bot_c.deploy_ready import get_signal_from_row, get_deploy_params, HARD_STOP_POSITION_PCT
 
@@ -539,9 +678,15 @@ def run_once(client, telegram_notifier=None, last_summary_date: str = "", last_s
     in_decision_window = _in_daily_decision_window(now_utc)
     params = get_deploy_params()
     regime_map = _load_regime_map()
+    risk_state = _load_risk_state()
+    equity = _get_total_equity_usdt(client)
+    risk_state = _refresh_circuit_state(risk_state, equity, now_utc)
+    _save_risk_state(risk_state)
 
     candidates: list[dict] = []
     candidate_symbols: list[str] = []
+    warning_msgs: list[str] = []
+    decision_text = "續抱"
 
     if in_decision_window and last_scan_date != today_utc:
         for symbol in SYMBOLS:
@@ -553,7 +698,29 @@ def run_once(client, telegram_notifier=None, last_summary_date: str = "", last_s
             regime_map[symbol] = current_regime
             if signal and signal.should_enter:
                 roc_30 = float(merged.get("roc_30", 0.0) or 0.0)
-                candidates.append({"symbol": symbol, "signal": signal, "row": merged, "roc_30": roc_30})
+                funding_rate = _get_funding_rate(client, symbol)
+                spread_pct = _get_spread_pct(client, symbol)
+                annual_funding = max(funding_rate, 0.0) * 3.0 * 365.0
+                # 做空 funding 過高直接跳過，避免長線侵蝕
+                if signal.side == "SELL" and annual_funding > FUNDING_SHORT_SKIP_ANNUAL:
+                    warning_msgs.append(
+                        f"{symbol} 做空跳過: funding年化 {annual_funding*100:.2f}% > {FUNDING_SHORT_SKIP_ANNUAL*100:.0f}%"
+                    )
+                    continue
+                if abs(funding_rate) > FUNDING_ALERT_RATE:
+                    warning_msgs.append(f"{symbol} Funding {funding_rate*100:.3f}%/8h 偏高")
+                if spread_pct > SPREAD_ALERT_PCT:
+                    warning_msgs.append(f"{symbol} Spread {spread_pct:.3f}% 偏大")
+                candidates.append(
+                    {
+                        "symbol": symbol,
+                        "signal": signal,
+                        "row": merged,
+                        "roc_30": roc_30,
+                        "funding_rate": funding_rate,
+                        "spread_pct": spread_pct,
+                    }
+                )
                 candidate_symbols.append(symbol)
         _save_regime_map(regime_map)
 
@@ -574,66 +741,116 @@ def run_once(client, telegram_notifier=None, last_summary_date: str = "", last_s
             f"[Macro Scan] 掃描日期: {today_utc} | 候選訊號: {candidate_symbols or ['None']} | "
             f"RS 仲裁選擇: {selected_symbol}"
         )
+        top3 = sorted(candidates, key=lambda x: abs(x["roc_30"]), reverse=True)[:3]
+        top3_fmt = [f"{x['symbol']}({x['roc_30']:+.2%})" for x in top3]
 
         if selected:
-            open_count = _count_open_positions(client)
-            if open_count >= MAX_CONCURRENT:
-                print(f"  [SKIP] 已達 MAX_CONCURRENT={MAX_CONCURRENT}")
-            elif has_open_position(client, selected["symbol"]):
-                print(f"  [SKIP] {selected['symbol']} 已有持倉")
+            if risk_state.get("circuit_active", False):
+                decision_text = "Circuit Breaker 啟動，暫停新倉"
+                print("  [RISK] Circuit Breaker 啟動，跳過新進場")
+                if telegram_notifier and getattr(telegram_notifier, "send_message", None):
+                    telegram_notifier.send_message(
+                        "🚨 <b>緊急止損警告</b>\n"
+                        f"當月峰值回撤已達 {risk_state.get('latest_drawdown_pct', 0.0):.2f}%\n"
+                        f"新倉暫停至: {risk_state.get('circuit_until_utc', 'N/A')}"
+                    )
             else:
-                signal = selected["signal"]
-                row = selected["row"]
-                symbol = selected["symbol"]
-                balance = get_available_balance(client)
-                qty = compute_qty(balance, signal.entry_price, RISK_PCT_OF_EQUITY, HARD_STOP_POSITION_PCT)
-                if qty <= 0:
-                    print(f"  [SKIP] 餘額不足或 qty=0 (balance={balance:.2f})")
+                open_count = _count_open_positions(client)
+                if open_count >= MAX_CONCURRENT:
+                    decision_text = "倉位已滿 Skip"
+                    print(f"  [SKIP] 已達 MAX_CONCURRENT={MAX_CONCURRENT}")
+                elif has_open_position(client, selected["symbol"]):
+                    decision_text = f"{selected['symbol']} 已有持倉 Skip"
+                    print(f"  [SKIP] {selected['symbol']} 已有持倉")
                 else:
-                    order = place_market_order(client, symbol, signal.side, qty)
-                    if order:
-                        sl_price = signal.sl_price
-                        stop_order = place_stop_market_close(client, symbol, signal.side, sl_price)
-                        stop_order_id = stop_order.get("orderId") if stop_order else None
-                        ts = row.get("timestamp")
-                        bar_time = ts.isoformat() if hasattr(ts, "isoformat") else str(ts)
-                        append_signal_record(
-                            {
-                                "time_utc": datetime.now(timezone.utc).isoformat(),
-                                "symbol": symbol,
-                                "bar_time": bar_time,
-                                "side": signal.side,
-                                "entry_price": round(signal.entry_price, 4),
-                                "sl_price": round(sl_price, 4),
-                                "tp_price": round(signal.tp_price, 4),
-                                "hard_stop_price": round(sl_price, 4),
-                                "regime": signal.regime,
-                                "roc_30": round(float(selected["roc_30"]), 6),
-                                "qty": qty,
-                                "order_id": order.get("orderId"),
-                                "stop_order_id": stop_order_id,
-                            }
-                        )
-                        print(
-                            f"  [FILL] {symbol} {signal.side} qty={qty} @ {signal.entry_price} "
-                            f"SL={sl_price} orderId={order.get('orderId')}"
-                        )
-                        if telegram_notifier and getattr(telegram_notifier, "send_message", None):
-                            margin_mode = get_margin_type_from_api(client, symbol)
-                            telegram_notifier.send_message(
-                                f"📊 <b>Macro 1D: {symbol} {signal.side}</b>\n"
-                                f"開倉模式: {margin_mode} | Entry: {signal.entry_price} | SL: {sl_price} | qty: {qty}\n"
-                                f"ROC30: {selected['roc_30']:+.2%} | 止損單 ID: {stop_order_id or 'N/A'}"
-                            )
+                    signal = selected["signal"]
+                    row = selected["row"]
+                    symbol = selected["symbol"]
+                    qty = _compute_qty_by_notional(equity, signal.entry_price, NOTIONAL_PCT_OF_EQUITY)
+                    if qty <= 0:
+                        decision_text = "淨值不足 Skip"
+                        print(f"  [SKIP] 淨值不足或 qty=0 (equity={equity:.2f})")
                     else:
-                        print("  [ERR] 市價單未成交")
+                        order = place_market_order(client, symbol, signal.side, qty)
+                        if order:
+                            decision_text = f"進場 {symbol}"
+                            sl_price = signal.sl_price
+                            stop_order = place_stop_market_close(client, symbol, signal.side, sl_price)
+                            stop_order_id = stop_order.get("orderId") if stop_order else None
+                            ts = row.get("timestamp")
+                            bar_time = ts.isoformat() if hasattr(ts, "isoformat") else str(ts)
+                            append_signal_record(
+                                {
+                                    "time_utc": datetime.now(timezone.utc).isoformat(),
+                                    "symbol": symbol,
+                                    "bar_time": bar_time,
+                                    "side": signal.side,
+                                    "entry_price": round(signal.entry_price, 4),
+                                    "sl_price": round(sl_price, 4),
+                                    "tp_price": round(signal.tp_price, 4),
+                                    "hard_stop_price": round(sl_price, 4),
+                                    "regime": signal.regime,
+                                    "roc_30": round(float(selected["roc_30"]), 6),
+                                    "funding_rate": round(float(selected["funding_rate"]), 8),
+                                    "spread_pct": round(float(selected["spread_pct"]), 6),
+                                    "qty": qty,
+                                    "order_id": order.get("orderId"),
+                                    "stop_order_id": stop_order_id,
+                                }
+                            )
+                            print(
+                                f"  [FILL] {symbol} {signal.side} qty={qty} @ {signal.entry_price} "
+                                f"SL={sl_price} orderId={order.get('orderId')}"
+                            )
+                            if telegram_notifier and getattr(telegram_notifier, "send_message", None):
+                                margin_mode = get_margin_type_from_api(client, symbol)
+                                telegram_notifier.send_message(
+                                    f"📊 <b>Macro 1D: {symbol} {signal.side}</b>\n"
+                                    f"開倉模式: {margin_mode} | Entry: {signal.entry_price} | SL: {sl_price} | qty: {qty}\n"
+                                    f"ROC30: {selected['roc_30']:+.2%} | Funding: {selected['funding_rate']*100:.3f}%/8h | "
+                                    f"Spread: {selected['spread_pct']:.3f}%"
+                                )
+                        else:
+                            decision_text = "下單失敗"
+                            print("  [ERR] 市價單未成交")
+        else:
+            top3_fmt = []
+            decision_text = "無有效訊號，續抱"
+
+        total_notional = _get_total_open_notional_usdt(client)
+        leverage_now = (total_notional / equity) if equity > 0 else 0.0
+        if leverage_now > LEVERAGE_WARN_THRESHOLD:
+            warning_msgs.append(f"真實槓桿 {leverage_now:.2f}x > {LEVERAGE_WARN_THRESHOLD:.2f}x")
+
+        prev_equity = float(risk_state.get("last_report_equity", equity) or equity)
+        equity_change_pct = ((equity - prev_equity) / prev_equity * 100.0) if prev_equity > 0 else 0.0
+        _send_macro_control_report(
+            telegram_notifier,
+            report_date=_now_taiwan().strftime("%Y-%m-%d"),
+            equity=equity,
+            equity_change_pct=equity_change_pct,
+            top3=top3_fmt,
+            decision=decision_text,
+            warnings=warning_msgs,
+            real_leverage=leverage_now,
+        )
+        risk_state["last_report_equity"] = equity
+        risk_state["last_report_date"] = today_utc
+        _save_risk_state(risk_state)
+
         last_scan_date = today_utc
 
+    # 保留原每日總結，避免中斷既有監控習慣
     last_summary_date = _send_daily_summary(client, telegram_notifier, last_summary_date)
     _write_heartbeat(datetime.now(timezone.utc).isoformat())
     mins_left = _minutes_to_next_1d_close()
     open_count = _count_open_positions(client)
-    print(f"[1D 決策模式] 距離下一根 1d 收盤: {mins_left} 分 | OpenPositions: {open_count}/{MAX_CONCURRENT}")
+    total_notional = _get_total_open_notional_usdt(client)
+    lev = (total_notional / equity) if equity > 0 else 0.0
+    print(
+        f"[1D 決策模式] 距離下一根 1d 收盤: {mins_left} 分 | OpenPositions: {open_count}/{MAX_CONCURRENT} | "
+        f"Equity: {equity:.2f} | Leverage: {lev:.2f}x"
+    )
     return 0, last_summary_date, last_scan_date
 
 
