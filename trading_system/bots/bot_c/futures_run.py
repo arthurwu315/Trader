@@ -10,9 +10,12 @@ from __future__ import annotations
 import json
 import os
 import sys
+import threading
 import time
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
+
+import requests
 
 # 台灣時區 (UTC+8)：print / Telegram 顯示用此；paper_signals.json、heartbeat 寫入維持 UTC
 TZ_TAIWAN = timezone(timedelta(hours=8))
@@ -717,6 +720,11 @@ def _count_open_positions(client) -> int:
 
 
 def _refresh_circuit_state(state: dict, equity: float, now_utc: datetime) -> dict:
+    if bool(state.get("circuit_permanent_lock", False)):
+        state["circuit_active"] = True
+        state["circuit_until_utc"] = "9999-12-31T00:00:00+00:00"
+        state["latest_drawdown_pct"] = float(state.get("latest_drawdown_pct", 0.0) or 0.0)
+        return state
     month_key = now_utc.strftime("%Y-%m")
     if state.get("month_key") != month_key:
         state["month_key"] = month_key
@@ -769,12 +777,142 @@ def _send_macro_control_report(
         f"🩺 持倉健康度: {' | '.join(health_lines) if health_lines else '無持倉'}\n"
         f"📐 真實槓桿率: {real_leverage:.2f}x\n"
         f"⚠️ 異常提醒: {warn_txt}\n"
-        "🆘 緊急指令預留: /close_all (目前僅保留說明，尚未啟用自動執行)"
+        "🆘 緊急指令: /close_all（30 秒內輸入 /confirm_kill 以執行）"
     )
     try:
         notifier.send_message(msg)
     except Exception as e:
         print(f"  [WARN] Telegram 中控報告發送失敗: {e}")
+
+
+def _get_exchange_open_symbols(client) -> set[str]:
+    out: set[str] = set()
+    try:
+        positions = client.get_position_risk()
+        for p in positions or []:
+            amt = float(p.get("positionAmt", 0) or 0)
+            symbol = str(p.get("symbol", ""))
+            if amt != 0 and symbol:
+                out.add(symbol)
+    except Exception:
+        pass
+    return out
+
+
+def _check_server_time_drift_ms(client) -> int | None:
+    try:
+        srv = client._call_with_retry("GET", "/fapi/v1/time", {})
+        server_ms = int(srv.get("serverTime", 0) or 0)
+        local_ms = int(time.time() * 1000)
+        return abs(server_ms - local_ms)
+    except Exception:
+        return None
+
+
+def _execute_close_all(client) -> tuple[int, float]:
+    """核按鈕：取消所有掛單 + 市價平所有倉位。"""
+    closed = 0
+    for symbol in SYMBOLS:
+        try:
+            client.cancel_all_orders(symbol)
+        except Exception:
+            pass
+        try:
+            positions = client.get_position_risk(symbol=symbol)
+            for p in positions or []:
+                amt = float(p.get("positionAmt", 0) or 0)
+                if amt == 0:
+                    continue
+                side = "SELL" if amt > 0 else "BUY"
+                qty = round(abs(amt), 6)
+                if qty <= 0:
+                    continue
+                client.place_order(
+                    {
+                        "symbol": symbol,
+                        "side": side,
+                        "type": "MARKET",
+                        "quantity": qty,
+                        "reduceOnly": "true",
+                    }
+                )
+                closed += 1
+        except Exception as e:
+            print(f"  [WARN] close_all {symbol} 失敗: {e}")
+    balance = _get_wallet_balance_usdt(client)
+    return closed, balance
+
+
+def _poll_telegram_updates(bot_token: str, offset: int) -> tuple[list[dict], int]:
+    """輪詢 Telegram getUpdates。"""
+    url = f"https://api.telegram.org/bot{bot_token}/getUpdates"
+    try:
+        resp = requests.get(url, params={"offset": offset, "timeout": 1}, timeout=5)
+        data = resp.json() if resp.status_code == 200 else {}
+        rows = data.get("result", []) if isinstance(data, dict) else []
+        next_offset = offset
+        for u in rows:
+            next_offset = max(next_offset, int(u.get("update_id", 0)) + 1)
+        return rows, next_offset
+    except Exception:
+        return [], offset
+
+
+def _telegram_command_loop():
+    """背景命令循環：/close_all 雙重確認。"""
+    try:
+        notifier = _get_telegram_notifier()
+        if not notifier or not getattr(notifier, "enabled", False):
+            return
+        chat_id = str(notifier.chat_id)
+        bot_token = str(notifier.bot_token)
+        if not bot_token or not chat_id:
+            return
+        cmd_client = get_client()
+        offset = 0
+        while True:
+            updates, offset = _poll_telegram_updates(bot_token, offset)
+            for u in updates:
+                msg = u.get("message", {}) if isinstance(u, dict) else {}
+                text = str(msg.get("text", "") or "").strip()
+                from_chat = str((msg.get("chat") or {}).get("id", ""))
+                if from_chat != chat_id or not text:
+                    continue
+                now_utc = datetime.now(timezone.utc)
+                state = _load_risk_state()
+
+                if text == "/close_all":
+                    deadline = (now_utc + timedelta(seconds=30)).isoformat()
+                    state["kill_confirm_deadline_utc"] = deadline
+                    _save_risk_state(state)
+                    notifier.send_message(
+                        "⚠️ 收到 /close_all。\n"
+                        "請在 30 秒內輸入 /confirm_kill 以執行全平倉與永久熔斷。"
+                    )
+                elif text == "/confirm_kill":
+                    deadline = _parse_iso_utc(str(state.get("kill_confirm_deadline_utc", "")))
+                    if not deadline or now_utc > deadline:
+                        notifier.send_message("❌ /confirm_kill 超時，請重新輸入 /close_all。")
+                        state.pop("kill_confirm_deadline_utc", None)
+                        _save_risk_state(state)
+                        continue
+
+                    closed_cnt, balance = _execute_close_all(cmd_client)
+                    state["circuit_permanent_lock"] = True
+                    state["circuit_active"] = True
+                    state["circuit_until_utc"] = "9999-12-31T00:00:00+00:00"
+                    state["expected_open_symbols"] = []
+                    state.pop("kill_confirm_deadline_utc", None)
+                    _save_risk_state(state)
+                    notifier.send_message(
+                        "🧨 <b>[核按鈕已執行]</b>\n"
+                        f"已嘗試平倉筆數: {closed_cnt}\n"
+                        f"當前帳戶可用餘額: {balance:.2f} USDT\n"
+                        "交易已永久鎖定（circuit_permanent_lock=true）。"
+                    )
+            time.sleep(2)
+    except Exception as e:
+        print(f"  [WARN] Telegram 指令循環異常: {e}")
 
 
 def run_once(client, telegram_notifier=None, last_summary_date: str = "", last_scan_date: str = ""):
@@ -789,6 +927,13 @@ def run_once(client, telegram_notifier=None, last_summary_date: str = "", last_s
     equity = _get_total_equity_usdt(client)
     risk_state = _refresh_circuit_state(risk_state, equity, now_utc)
     _save_risk_state(risk_state)
+    # 伺服器時間同步檢查（>1s 警告）
+    drift_ms = _check_server_time_drift_ms(client)
+    if drift_ms is not None and drift_ms > 1000:
+        warning = f"伺服器時間偏移 {drift_ms}ms > 1000ms，請檢查 NTP"
+        print(f"  [WARN] {warning}")
+        if telegram_notifier and getattr(telegram_notifier, "send_message", None):
+            telegram_notifier.send_message(f"⚠️ <b>[時間同步警告]</b>\n{warning}")
 
     candidates: list[dict] = []
     candidate_symbols: list[str] = []
@@ -798,6 +943,22 @@ def run_once(client, telegram_notifier=None, last_summary_date: str = "", last_s
     decision_text = "續抱"
 
     if in_decision_window and last_scan_date != today_utc:
+        # 每日對帳：本地預期持倉 vs 交易所真實持倉
+        exchange_open = _get_exchange_open_symbols(client)
+        local_open = set(regime_map.get("_open_symbols", []))
+        if local_open != exchange_open:
+            risk_state["expected_open_symbols"] = sorted(exchange_open)
+            regime_map["_open_symbols"] = sorted(exchange_open)
+            _save_regime_map(regime_map)
+            _save_risk_state(risk_state)
+            if telegram_notifier and getattr(telegram_notifier, "send_message", None):
+                telegram_notifier.send_message(
+                    "🚨 <b>[同步異常]</b>\n"
+                    f"本地持倉: {sorted(local_open)}\n"
+                    f"交易所持倉: {sorted(exchange_open)}\n"
+                    "已強制校準本地狀態，請檢查！"
+                )
+
         for symbol in SYMBOLS:
             merged, _, _ = fetch_merged_row(client, symbol)
             if merged is None:
@@ -928,6 +1089,12 @@ def run_once(client, telegram_notifier=None, last_summary_date: str = "", last_s
                                     f"ROC30: {selected['roc_30']:+.2%} | Funding: {selected['funding_rate']*100:.3f}%/8h | "
                                     f"Spread: {selected['spread_pct']:.3f}%"
                                 )
+                            # 下單後同步預期持倉（由交易所結果覆蓋）
+                            synced_open = sorted(_get_exchange_open_symbols(client))
+                            risk_state["expected_open_symbols"] = synced_open
+                            regime_map["_open_symbols"] = synced_open
+                            _save_regime_map(regime_map)
+                            _save_risk_state(risk_state)
                         else:
                             decision_text = "下單失敗"
                             print("  [ERR] 市價單未成交")
@@ -1019,6 +1186,9 @@ def main():
         init_futures_settings(client, symbol, leverage=LEVERAGE, margin_type="ISOLATED", has_position=bool(position))
 
     telegram_notifier = _get_telegram_notifier()
+    # 背景指令循環：支援 /close_all -> /confirm_kill 雙重確認
+    cmd_thread = threading.Thread(target=_telegram_command_loop, daemon=True)
+    cmd_thread.start()
     consecutive_fail = 0
     last_summary_date = ""
     last_scan_date = ""
