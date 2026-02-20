@@ -52,10 +52,13 @@ def add_factor_columns(df: pd.DataFrame) -> pd.DataFrame:
     out["atr"] = atr
     out["volatility"] = (atr / close).fillna(0)
 
-    # 突破: 收盤突破前 N 根最高/最低
+    # 突破: 收盤突破前 N 根最高/最低（20/40/60 波動率突破；20/55/89 4H Donchian 宏觀）
+    for lb in (20, 40, 55, 60, 89):
+        out[f"roll_high_{lb}"] = high.rolling(lb, min_periods=lb).max().shift(1)
+        out[f"roll_low_{lb}"] = low.rolling(lb, min_periods=lb).min().shift(1)
     lookback = 20
-    out["roll_high"] = high.rolling(lookback, min_periods=lookback).max().shift(1)
-    out["roll_low"] = low.rolling(lookback, min_periods=lookback).min().shift(1)
+    out["roll_high"] = out["roll_high_20"]
+    out["roll_low"] = out["roll_low_20"]
     out["price_breakout_long"] = (close > out["roll_high"]).astype(int)
     out["price_breakout_short"] = (close < out["roll_low"]).astype(int)
 
@@ -79,8 +82,32 @@ def add_factor_columns(df: pd.DataFrame) -> pd.DataFrame:
     out["macd_above_signal"] = (out["macd_line"] > out["macd_signal"]).astype(int)
     out["macd_below_signal"] = (out["macd_line"] < out["macd_signal"]).astype(int)
 
-    # 趨勢過濾：EMA 200，僅在價格 > EMA200 做多、< EMA200 做空
+    # 趨勢過濾：EMA 100/200，供波動率突破與原策略
+    out["ema_100"] = close.ewm(span=100, adjust=False).mean()
     out["ema_200"] = close.ewm(span=200, adjust=False).mean()
+    # 日線級別趨勢濾網：1200 根 4H ≈ 200 天，用於 4H 策略的 HTF 過濾 (EMA_200_1D)
+    out["ema_200_1d"] = close.ewm(span=1200, adjust=False).mean()
+
+    # 布林帶 (Bollinger Bands)：N=20, 標準差=2.0；供逆勢回歸與波動率壓縮突破
+    for bb_n in (20, 40):
+        sma = close.rolling(bb_n, min_periods=bb_n).mean()
+        std = close.rolling(bb_n, min_periods=bb_n).std().fillna(0)
+        out[f"bb_mid_{bb_n}"] = sma
+        for mult in (2.0, 2.5):
+            key = "2p0" if mult == 2.0 else "2p5"
+            out[f"bb_up_{bb_n}_{key}"] = sma + mult * std
+            out[f"bb_low_{bb_n}_{key}"] = sma - mult * std
+
+    # 布林帶寬度 BBW = (BB_UP - BB_LOW) / BB_MID；過去 K 根平均 BBW 供放寬 Squeeze 判定 (BBW < mean_K * 0.8)
+    bb_mid_20 = out["bb_mid_20"]
+    bb_up_20 = out["bb_up_20_2p0"]
+    bb_low_20 = out["bb_low_20_2p0"]
+    out["bbw"] = (bb_up_20 - bb_low_20) / bb_mid_20.replace(0, np.nan).fillna(1.0)
+    for k in (50, 80):
+        out[f"bbw_mean_{k}"] = out["bbw"].rolling(k, min_periods=k).mean().shift(1)
+
+    # 1H 趨勢濾網：EMA100
+    out["ema_100_1h"] = close.ewm(span=100, adjust=False).mean()
 
     return out
 
@@ -234,14 +261,142 @@ class StrategyBNB:
         use_regime = self._use_regime
         min_score = self._min_score
         last_regime: Optional[str] = None  # 動態緩衝滯後用
+        use_atr_breakout = "lookback_n" in self.entry_thresholds
+        use_bb_reversion = "bb_n" in self.entry_thresholds
+        use_donchian = "donchian_n" in self.entry_thresholds
+        use_squeeze = "squeeze_k" in self.entry_thresholds
 
         for i in range(1, n):
             row = df.iloc[i]
             score = 0
             required = self.min_factors_required
             bar_direction = self.direction
+            tp_bb_mid: Optional[float] = None  # 逆勢回歸時 TP = 中軌
 
-            if use_regime:
+            if use_squeeze:
+                # 波動率壓縮突破（放寬）：Squeeze = BBW < bbw_mean_K * 0.8；LONG = Squeeze 且 close > BB_UP 且 close > ema_100_1h；SHORT = Squeeze 且 close < BB_LOW 且 close < ema_100_1h
+                squeeze_k = int(self.entry_thresholds.get("squeeze_k", 50))
+                if squeeze_k not in (50, 80):
+                    squeeze_k = 50
+                bbw_mean_col = f"bbw_mean_{squeeze_k}"
+                if bbw_mean_col not in row.index or "bbw" not in row.index or "bb_up_20_2p0" not in row.index or "bb_low_20_2p0" not in row.index or "ema_100_1h" not in row.index:
+                    continue
+                close_val = float(row["close"])
+                bbw = row.get("bbw")
+                bbw_mean = row.get(bbw_mean_col)
+                bb_up = row.get("bb_up_20_2p0")
+                bb_low = row.get("bb_low_20_2p0")
+                ema_100_1h = row.get("ema_100_1h")
+                if pd.isna(bbw) or pd.isna(bbw_mean) or pd.isna(bb_up) or pd.isna(bb_low) or pd.isna(ema_100_1h):
+                    continue
+                bbw = float(bbw)
+                bbw_mean = float(bbw_mean)
+                bb_up = float(bb_up)
+                bb_low = float(bb_low)
+                ema_100_1h = float(ema_100_1h)
+                in_squeeze = bbw < (bbw_mean * 0.8)
+                if not in_squeeze:
+                    continue
+                if close_val > bb_up and close_val > ema_100_1h:
+                    bar_direction = "long"
+                elif close_val < bb_low and close_val < ema_100_1h:
+                    bar_direction = "short"
+                else:
+                    continue
+            elif use_donchian:
+                # 4H 宏觀 Donchian：LONG = close > 過去 N 根最高價；SHORT = close < 過去 N 根最低價；可選日線濾網 (價格 vs EMA_200_1D)
+                donchian_n = int(self.entry_thresholds.get("donchian_n", 20))
+                if donchian_n not in (20, 55, 89):
+                    donchian_n = 20
+                use_1d_filter = bool(self.entry_thresholds.get("use_1d_filter", False))
+                roll_high_col = f"roll_high_{donchian_n}"
+                roll_low_col = f"roll_low_{donchian_n}"
+                if roll_high_col not in row.index or roll_low_col not in row.index:
+                    continue
+                close_val = float(row["close"])
+                roll_high_val = row.get(roll_high_col)
+                roll_low_val = row.get(roll_low_col)
+                if pd.isna(roll_high_val) or pd.isna(roll_low_val):
+                    continue
+                roll_high_val = float(roll_high_val)
+                roll_low_val = float(roll_low_val)
+                if close_val > roll_high_val:
+                    bar_direction = "long"
+                elif close_val < roll_low_val:
+                    bar_direction = "short"
+                else:
+                    continue
+                if use_1d_filter:
+                    ema_1d = row.get("ema_200_1d")
+                    if pd.isna(ema_1d):
+                        continue
+                    ema_1d = float(ema_1d)
+                    if bar_direction == "long" and close_val <= ema_1d:
+                        continue
+                    if bar_direction == "short" and close_val >= ema_1d:
+                        continue
+            elif use_bb_reversion:
+                # 逆勢均值回歸：LONG = close < BB_LOW 且 RSI < RSI_LOWER；SHORT = close > BB_UP 且 RSI > RSI_UPPER
+                bb_n = int(self.entry_thresholds.get("bb_n", 20))
+                if bb_n not in (20, 40):
+                    bb_n = 20
+                bb_mult = float(self.entry_thresholds.get("bb_mult", 2.0))
+                bb_key = "2p0" if bb_mult <= 2.25 else "2p5"
+                rsi_lower = float(self.entry_thresholds.get("rsi_lower_thresh", 25))
+                rsi_upper = float(self.entry_thresholds.get("rsi_upper_thresh", 75))
+                bb_mid_col = f"bb_mid_{bb_n}"
+                bb_up_col = f"bb_up_{bb_n}_{bb_key}"
+                bb_low_col = f"bb_low_{bb_n}_{bb_key}"
+                if bb_mid_col not in row.index or bb_up_col not in row.index or bb_low_col not in row.index:
+                    continue
+                close_val = float(row["close"])
+                bb_mid_val = row.get(bb_mid_col)
+                bb_up_val = row.get(bb_up_col)
+                bb_low_val = row.get(bb_low_col)
+                rsi_val = row.get("rsi", 50)
+                if pd.isna(bb_mid_val) or pd.isna(bb_up_val) or pd.isna(bb_low_val) or pd.isna(rsi_val):
+                    continue
+                bb_mid_val = float(bb_mid_val)
+                bb_up_val = float(bb_up_val)
+                bb_low_val = float(bb_low_val)
+                rsi_val = float(rsi_val)
+                if close_val < bb_low_val and rsi_val < rsi_lower:
+                    bar_direction = "long"
+                    tp_bb_mid = bb_mid_val
+                elif close_val > bb_up_val and rsi_val > rsi_upper:
+                    bar_direction = "short"
+                    tp_bb_mid = bb_mid_val
+                else:
+                    continue
+            elif use_atr_breakout:
+                # 波動率突破：LONG = close > EMA 且 close > 最高價(N根)；SHORT = close < EMA 且 close < 最低價(N根)
+                lookback_n = int(self.entry_thresholds.get("lookback_n", 20))
+                ema_period = int(self.entry_thresholds.get("ema_period", 200))
+                if lookback_n not in (20, 40, 60):
+                    lookback_n = 20
+                ema_col = f"ema_{ema_period}"
+                roll_high_col = f"roll_high_{lookback_n}"
+                roll_low_col = f"roll_low_{lookback_n}"
+                if ema_col not in row.index or roll_high_col not in row.index:
+                    continue
+                close_val = float(row["close"])
+                ema_val = row.get(ema_col)
+                if pd.isna(ema_val):
+                    continue
+                ema_val = float(ema_val)
+                roll_high_val = row.get(roll_high_col)
+                roll_low_val = row.get(roll_low_col)
+                if pd.isna(roll_high_val) or pd.isna(roll_low_val):
+                    continue
+                roll_high_val = float(roll_high_val)
+                roll_low_val = float(roll_low_val)
+                if close_val > ema_val and close_val > roll_high_val:
+                    bar_direction = "long"
+                elif close_val < ema_val and close_val < roll_low_val:
+                    bar_direction = "short"
+                else:
+                    continue
+            elif use_regime:
                 bar_direction, score, required = self._vote_score_regime(row)
                 if score < required:
                     continue
@@ -316,9 +471,9 @@ class StrategyBNB:
                 if score < required:
                     continue
 
-            # 趨勢過濾：非 regime 時僅在價格 > EMA200 做多、< EMA200 做空；可選動態緩衝 (k_up, k_down) + 滯後
+            # 趨勢過濾：非 regime 時僅在價格 > EMA200 做多、< EMA200 做空；squeeze/donchian/atr_breakout/bb_reversion 已自訂條件，跳過
             close_val = float(row["close"])
-            if not use_regime:
+            if not use_squeeze and not use_donchian and not use_atr_breakout and not use_bb_reversion and not use_regime:
                 ema200 = row.get("ema_200")
                 if pd.notna(ema200):
                     ema200 = float(ema200)
@@ -356,10 +511,18 @@ class StrategyBNB:
 
             er = self.exit_rules
             tp_atr = getattr(er, "tp_atr_mult", None)
+            use_bb_tp = use_bb_reversion and tp_bb_mid is not None
+            # Donchian / Squeeze：無固定 TP，僅 ATR 追蹤止損，設遠 TP 避免觸及
+            use_far_tp = use_donchian or use_squeeze
+            far_tp_atr = 50.0
             if bar_direction == "long":
                 sl = close - er.sl_atr_mult * atr
                 r_dist = close - sl
-                if tp_atr is not None:
+                if use_far_tp:
+                    tp = close + far_tp_atr * atr
+                elif use_bb_tp:
+                    tp = tp_bb_mid  # 逆勢回歸：止盈為中軌
+                elif tp_atr is not None:
                     tp = close + tp_atr * atr
                 elif er.tp_r_mult is not None:
                     tp = close + er.tp_r_mult * r_dist
@@ -371,7 +534,11 @@ class StrategyBNB:
             else:
                 sl = close + er.sl_atr_mult * atr
                 r_dist = sl - close
-                if tp_atr is not None:
+                if use_far_tp:
+                    tp = close - far_tp_atr * atr
+                elif use_bb_tp:
+                    tp = tp_bb_mid  # 逆勢回歸：止盈為中軌
+                elif tp_atr is not None:
                     tp = close - tp_atr * atr
                 elif er.tp_r_mult is not None:
                     tp = close - er.tp_r_mult * r_dist
