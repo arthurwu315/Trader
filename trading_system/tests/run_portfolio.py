@@ -19,6 +19,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+import pandas as pd
+
 os.environ.setdefault("SKIP_CONFIG_VALIDATION", "1")
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -51,8 +53,10 @@ MAX_CONCURRENT = 2
 @dataclass
 class PortfolioTrade:
     symbol: str
+    side: str
     entry_time: Any
     exit_time: Any
+    roc_24: float
     return_net_pct: float
     pnl_usdt: float
 
@@ -96,6 +100,8 @@ def _run_single_symbol_backtest(symbol: str) -> list[PortfolioTrade]:
     df = fetch_klines_df(client, symbol, INTERVAL, start_dt, end_dt)
     if df.empty:
         return []
+    df["roc_24"] = df["close"].pct_change(24)
+    roc_map = dict(zip(pd.to_datetime(df["timestamp"], utc=True), df["roc_24"]))
 
     strategy = build_strategy()
     engine = BacktestEngineBNB(position_size_pct=0.02, max_trades_per_day=10)
@@ -110,11 +116,17 @@ def _run_single_symbol_backtest(symbol: str) -> list[PortfolioTrade]:
     trades: list[PortfolioTrade] = []
     for t in res.get("trades", []):
         pnl = NOTIONAL_PER_TRADE * (float(t.return_net_pct) / 100.0)
+        entry_ts = pd.Timestamp(t.entry_time)
+        entry_ts = entry_ts.tz_convert("UTC") if entry_ts.tzinfo else entry_ts.tz_localize("UTC")
+        roc_val = roc_map.get(entry_ts, 0.0)
+        roc_val = 0.0 if pd.isna(roc_val) else float(roc_val)
         trades.append(
             PortfolioTrade(
                 symbol=symbol,
+                side=str(t.side).upper(),
                 entry_time=t.entry_time,
                 exit_time=t.exit_time,
+                roc_24=roc_val,
                 return_net_pct=float(t.return_net_pct),
                 pnl_usdt=pnl,
             )
@@ -136,21 +148,45 @@ async def fetch_and_backtest_all_symbols() -> list[PortfolioTrade]:
     return merged
 
 
-def apply_portfolio_risk_limits(all_trades: list[PortfolioTrade]) -> tuple[list[PortfolioTrade], int]:
+def apply_portfolio_risk_limits(all_trades: list[PortfolioTrade]) -> tuple[list[PortfolioTrade], dict[str, int]]:
     all_trades_sorted = sorted(all_trades, key=lambda t: t.entry_time)
+    # 相近 1~2 小時視為同一批訊號；每批同方向只留最優相對強弱
+    buckets: dict[pd.Timestamp, list[PortfolioTrade]] = {}
+    for tr in all_trades_sorted:
+        key = pd.Timestamp(tr.entry_time).floor("2h")
+        buckets.setdefault(key, []).append(tr)
+
+    rs_selected: list[PortfolioTrade] = []
+    skipped_by_rs = 0
+    for _, batch in sorted(buckets.items(), key=lambda kv: kv[0]):
+        longs = [t for t in batch if t.side == "BUY"]
+        shorts = [t for t in batch if t.side == "SELL"]
+        if longs:
+            best_long = max(longs, key=lambda t: t.roc_24)  # 做多選最強
+            rs_selected.append(best_long)
+            skipped_by_rs += max(0, len(longs) - 1)
+        if shorts:
+            best_short = min(shorts, key=lambda t: t.roc_24)  # 做空選最弱
+            rs_selected.append(best_short)
+            skipped_by_rs += max(0, len(shorts) - 1)
+
+    rs_selected.sort(key=lambda t: t.entry_time)
     accepted: list[PortfolioTrade] = []
     active: list[PortfolioTrade] = []
-    skipped = 0
-
-    for tr in all_trades_sorted:
+    skipped_by_concurrent = 0
+    for tr in rs_selected:
         active = [a for a in active if a.exit_time > tr.entry_time]
         if len(active) >= MAX_CONCURRENT:
-            skipped += 1
+            skipped_by_concurrent += 1
             continue
         accepted.append(tr)
         active.append(tr)
 
-    return accepted, skipped
+    return accepted, {
+        "skipped_by_rs": skipped_by_rs,
+        "skipped_by_concurrent": skipped_by_concurrent,
+        "skipped_total": skipped_by_rs + skipped_by_concurrent,
+    }
 
 
 def portfolio_metrics(trades: list[PortfolioTrade]) -> dict[str, float]:
@@ -209,7 +245,9 @@ async def main():
     print("Portfolio Backtest Report")
     print("=" * 80)
     print(f"Total Trades:            {int(metrics['total_trades'])}")
-    print(f"Skipped (risk limit):    {skipped}")
+    print(f"Skipped by RS arbiter:   {skipped['skipped_by_rs']}")
+    print(f"Skipped by concurrency:  {skipped['skipped_by_concurrent']}")
+    print(f"Skipped total:           {skipped['skipped_total']}")
     print(f"Portfolio Net Profit:    {metrics['net_profit']:+.2f} USDT")
     print(f"Max Drawdown %:          {metrics['max_drawdown_pct']:.2f}%")
     pf = metrics["profit_factor"]

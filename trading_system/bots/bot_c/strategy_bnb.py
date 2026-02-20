@@ -42,6 +42,7 @@ def add_factor_columns(df: pd.DataFrame) -> pd.DataFrame:
 
     out["oi_proxy"] = volume / volume.rolling(24, min_periods=1).mean().replace(0, np.nan)
     out["oi_proxy"] = out["oi_proxy"].fillna(1.0)
+    out["vol_ma_20"] = volume.rolling(20, min_periods=20).mean().shift(1)
 
     # ATR(14) / close，並保留 atr 供 SL/TP 計算
     atr_period = 14
@@ -271,26 +272,37 @@ class StrategyBNB:
             tp_bb_mid: Optional[float] = None  # 逆勢回歸時 TP = 中軌
 
             if use_squeeze:
-                # 極嚴 Squeeze：bbw_min_K = BBW.rolling(K).min().shift(1)；Squeeze = 當前 BBW <= bbw_min_K * 1.05；LONG = Squeeze 且 Close > BB_UP，SHORT = Squeeze 且 Close < BB_LOW
+                # 極嚴 Squeeze + 量能濾網：突破時需 Volume > vol_ma_20 * 1.5，過濾無量假突破
                 squeeze_k = int(self.entry_thresholds.get("squeeze_k", 100))
                 if squeeze_k not in (100, 120, 150):
                     squeeze_k = 100
                 bbw_min_col = f"bbw_min_{squeeze_k}"
-                if bbw_min_col not in row.index or "bbw" not in row.index or "bb_up_20_2p0" not in row.index or "bb_low_20_2p0" not in row.index:
+                if (
+                    bbw_min_col not in row.index
+                    or "bbw" not in row.index
+                    or "bb_up_20_2p0" not in row.index
+                    or "bb_low_20_2p0" not in row.index
+                    or "vol_ma_20" not in row.index
+                ):
                     continue
                 close_val = float(row["close"])
                 bbw = row.get("bbw")
                 bbw_min = row.get(bbw_min_col)
                 bb_up = row.get("bb_up_20_2p0")
                 bb_low = row.get("bb_low_20_2p0")
-                if pd.isna(bbw) or pd.isna(bbw_min) or pd.isna(bb_up) or pd.isna(bb_low):
+                vol_ma_20 = row.get("vol_ma_20")
+                volume_now = row.get("volume")
+                if pd.isna(bbw) or pd.isna(bbw_min) or pd.isna(bb_up) or pd.isna(bb_low) or pd.isna(vol_ma_20) or pd.isna(volume_now):
                     continue
                 bbw = float(bbw)
                 bbw_min = float(bbw_min)
                 bb_up = float(bb_up)
                 bb_low = float(bb_low)
+                vol_ma_20 = float(vol_ma_20)
+                volume_now = float(volume_now)
                 in_squeeze = bbw <= (bbw_min * 1.05)
-                if not in_squeeze:
+                volume_spike = vol_ma_20 > 0 and volume_now > (vol_ma_20 * 1.5)
+                if not in_squeeze or not volume_spike:
                     continue
                 if close_val > bb_up:
                     bar_direction = "long"
