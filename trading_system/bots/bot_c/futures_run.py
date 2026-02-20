@@ -60,6 +60,7 @@ LOG_DIR = ROOT / "logs"
 SIGNALS_FILE = LOG_DIR / "paper_signals.json"
 TRADE_HISTORY_CSV = LOG_DIR / "trade_history.csv"
 HEARTBEAT_FILE = LOG_DIR / "paper_last_heartbeat.txt"
+REGIME_FILE = LOG_DIR / "paper_last_regime.txt"
 DISCONNECT_ALERT_FILE = LOG_DIR / "paper_disconnect_alert.log"
 TRADE_HISTORY_HEADER = "entry_time_tw,exit_time_tw,side,qty,entry_price,exit_price,pnl_usdt,pnl_pct,fees,funding"
 CONSECUTIVE_FAIL_THRESHOLD = 3
@@ -562,10 +563,35 @@ def run_once(client, telegram_notifier=None, last_summary_date: str = "", last_p
                         print(f"  [WARN] 平倉 Telegram 發送失敗: {tg_err}")
         except Exception as e:
             print(f"  [WARN] 平倉寫入帳本失敗: {e}")
-    from bots.bot_c.deploy_ready import get_signal_from_row, get_deploy_params, HARD_STOP_POSITION_PCT
-    # 僅在 1h 收盤後之決策窗口內評估進場（與回測一致）
-    signal = get_signal_from_row(row, get_deploy_params()) if in_decision_window else None
+    from bots.bot_c.deploy_ready import (
+        get_signal_from_row,
+        get_deploy_params,
+        HARD_STOP_POSITION_PCT,
+        K_UP,
+        K_DOWN,
+    )
+    last_regime: str | None = None
+    if REGIME_FILE.exists():
+        try:
+            last_regime = REGIME_FILE.read_text(encoding="utf-8").strip() or None
+        except Exception:
+            pass
+    params = get_deploy_params()
+    signal, current_regime = get_signal_from_row(row, params, last_regime=last_regime)
+    try:
+        REGIME_FILE.parent.mkdir(parents=True, exist_ok=True)
+        REGIME_FILE.write_text(current_regime, encoding="utf-8")
+    except Exception:
+        pass
     hard_stop_pct = HARD_STOP_POSITION_PCT
+    atr = float(row.get("atr", 0.0))
+    ema200_raw = row.get("ema_200")
+    ema200 = float(ema200_raw) if ema200_raw is not None and str(ema200_raw) != "nan" else None
+    if atr <= 0:
+        atr = float(row.get("close", 0)) * 0.02
+    bear_price = (ema200 - K_DOWN * atr) if ema200 is not None else 0.0
+    bull_price = (ema200 + K_UP * atr) if ema200 is not None else 0.0
+    print(f"[Regime 診斷] ATR: {atr:.2f} | 門檻: {bear_price:.1f} ~ {bull_price:.1f} | 當前模式: {current_regime}")
 
     if in_decision_window and signal and signal.should_enter:
         ts = row.get("timestamp")

@@ -233,6 +233,7 @@ class StrategyBNB:
         use_vote = self._use_vote
         use_regime = self._use_regime
         min_score = self._min_score
+        last_regime: Optional[str] = None  # 動態緩衝滯後用
 
         for i in range(1, n):
             row = df.iloc[i]
@@ -315,16 +316,36 @@ class StrategyBNB:
                 if score < required:
                     continue
 
-            # 趨勢過濾：非 regime 時僅在價格 > EMA200 做多、< EMA200 做空
+            # 趨勢過濾：非 regime 時僅在價格 > EMA200 做多、< EMA200 做空；可選動態緩衝 (k_up, k_down) + 滯後
             close_val = float(row["close"])
             if not use_regime:
                 ema200 = row.get("ema_200")
                 if pd.notna(ema200):
                     ema200 = float(ema200)
-                    if self.direction == "long" and close_val <= ema200:
-                        continue
-                    if self.direction == "short" and close_val >= ema200:
-                        continue
+                    atr_val = float(row.get("atr", 0.0))
+                    if atr_val <= 0:
+                        atr_val = close_val * 0.02
+                    k_up = self.entry_thresholds.get("k_up")
+                    k_down = self.entry_thresholds.get("k_down")
+                    if k_up is not None and k_down is not None:
+                        bull_thresh = ema200 + float(k_up) * atr_val
+                        bear_thresh = ema200 - float(k_down) * atr_val
+                        if close_val >= bull_thresh:
+                            bar_regime = "long"
+                        elif close_val <= bear_thresh:
+                            bar_regime = "short"
+                        else:
+                            bar_regime = last_regime if last_regime in ("long", "short") else "short"
+                        last_regime = bar_regime
+                        if self.direction == "long" and bar_regime != "long":
+                            continue
+                        if self.direction == "short" and bar_regime != "short":
+                            continue
+                    else:
+                        if self.direction == "long" and close_val <= ema200:
+                            continue
+                        if self.direction == "short" and close_val >= ema200:
+                            continue
 
             close = close_val
             atr = float(row.get("atr", 0.0))

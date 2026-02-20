@@ -8,7 +8,7 @@ BNB/USDT 實盤接入檔 - 牛熊分治 (Regime-Specific)
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Tuple
 
 # 牛熊分治 Z-Score 門檻
 LONG_Z_THRESH = 1.0
@@ -17,6 +17,12 @@ LONG_MIN_SCORE = 1
 SHORT_FUNDING_Z = 0.62
 SHORT_RSI_Z = 2.0
 SHORT_MIN_SCORE = 2
+
+# 動態非對稱波動率緩衝（Asymmetric Volatility-Adjusted Buffer）
+# BULL_THRESHOLD = EMA200 + (K_UP * ATR), BEAR_THRESHOLD = EMA200 - (K_DOWN * ATR)
+# 緩衝帶內維持前一小時狀態（Hysteresis）。對多頭嚴格、對空頭靈敏。
+K_UP = 1.5
+K_DOWN = 0.5
 
 # 與 best_strategy / 優化報告同步
 DEPLOY_PARAMS = {
@@ -31,6 +37,8 @@ DEPLOY_PARAMS = {
     "sl_atr_mult": 2.0,
     "tp_atr_mult": 2.5,
     "trailing_stop_atr_mult": None,
+    "k_up": K_UP,
+    "k_down": K_DOWN,
 }
 
 # 風控常數
@@ -88,11 +96,34 @@ def _vote_score_short(
     return score
 
 
-def get_signal_from_row(row: Dict[str, Any], params: Optional[Dict[str, Any]] = None) -> Optional[SignalOut]:
+def _get_regime_with_buffer(
+    close: float,
+    ema200: float,
+    atr: float,
+    k_up: float,
+    k_down: float,
+    last_regime: Optional[str] = None,
+) -> str:
+    """動態非對稱緩衝：BULL = EMA200 + K_UP*ATR, BEAR = EMA200 - K_DOWN*ATR；緩衝帶內維持 last_regime。"""
+    bull_thresh = ema200 + k_up * atr
+    bear_thresh = ema200 - k_down * atr
+    if close >= bull_thresh:
+        return "bull"
+    if close <= bear_thresh:
+        return "bear"
+    if last_regime in ("bull", "bear"):
+        return last_regime
+    return "bear"
+
+
+def get_signal_from_row(
+    row: Dict[str, Any],
+    params: Optional[Dict[str, Any]] = None,
+    last_regime: Optional[str] = None,
+) -> Tuple[Optional[SignalOut], str]:
     """
-    牛熊分治：依 close 與 ema_200 決定 regime。
-    - 價格 > EMA200（牛市）：用 LONG_Z_THRESH、LONG_MIN_SCORE 評估做多。
-    - 價格 < EMA200（熊市）：用 SHORT_Z_THRESH、SHORT_MIN_SCORE 評估做空。
+    牛熊分治 + 動態非對稱波動率緩衝（ATR 緩衝帶內維持前一小時狀態）。
+    回傳 (signal_or_none, current_regime)。
     """
     p = params or DEPLOY_PARAMS
     close = float(row["close"])
@@ -104,18 +135,20 @@ def get_signal_from_row(row: Dict[str, Any], params: Optional[Dict[str, Any]] = 
     atr = float(row.get("atr", 0.0))
     if atr <= 0:
         atr = close * 0.02
+    k_up = float(p.get("k_up", K_UP))
+    k_down = float(p.get("k_down", K_DOWN))
+    regime = _get_regime_with_buffer(close, ema200, atr, k_up, k_down, last_regime)
 
-    if close > ema200:
-        regime = "bull"
+    if regime == "bull":
         # 資金費率過濾：多頭過熱時抑制做多以節省利息
         funding_z = row.get("funding_z_score")
         if funding_z is not None and isinstance(funding_z, (int, float)) and float(funding_z) > 0.5:
-            return None
+            return None, regime
         z_thresh = p.get("funding_z_long", LONG_Z_THRESH)
         min_score = int(p.get("min_score_long", LONG_MIN_SCORE))
         score = _vote_score_long(row, z_thresh)
         if score < min_score:
-            return None
+            return None, regime
         sl_atr = p.get("sl_atr_mult", 1.5)
         tp_atr = p.get("tp_atr_mult", 2.5)
         sl_price = close - sl_atr * atr
@@ -130,15 +163,14 @@ def get_signal_from_row(row: Dict[str, Any], params: Optional[Dict[str, Any]] = 
             hard_stop_price=hard_stop_price,
             atr=atr,
             regime=regime,
-        )
+        ), regime
     else:
-        regime = "bear"
         fz = p.get("funding_z_short", SHORT_FUNDING_Z)
         rz = p.get("rsi_z_short", SHORT_RSI_Z)
         min_score = int(p.get("min_score_short", SHORT_MIN_SCORE))
         score = _vote_score_short(row, fz, rz)
         if score < min_score:
-            return None
+            return None, regime
         sl_atr = p.get("sl_atr_mult", 1.5)
         tp_atr = p.get("tp_atr_mult", 2.5)
         sl_price = close + sl_atr * atr
@@ -153,11 +185,11 @@ def get_signal_from_row(row: Dict[str, Any], params: Optional[Dict[str, Any]] = 
             hard_stop_price=hard_stop_price,
             atr=atr,
             regime=regime,
-        )
+        ), regime
 
 
 def get_deploy_params() -> Dict[str, Any]:
-    """回傳目前部署參數（含牛熊門檻與風控）。"""
+    """回傳目前部署參數（含牛熊門檻、動態緩衝 K_UP/K_DOWN 與風控）。"""
     return {
         **DEPLOY_PARAMS,
         "long_z_thresh": LONG_Z_THRESH,
@@ -165,6 +197,8 @@ def get_deploy_params() -> Dict[str, Any]:
         "short_rsi_z": SHORT_RSI_Z,
         "hard_stop_position_pct": HARD_STOP_POSITION_PCT,
         "position_size": POSITION_SIZE,
+        "k_up": K_UP,
+        "k_down": K_DOWN,
     }
 
 
