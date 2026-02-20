@@ -274,6 +274,7 @@ class StrategyBNB:
             if use_squeeze:
                 # 極嚴 Squeeze + 量能濾網：突破時需 Volume > vol_ma_20 * 1.5，過濾無量假突破
                 squeeze_k = int(self.entry_thresholds.get("squeeze_k", 100))
+                vol_mult = float(self.entry_thresholds.get("vol_mult", 1.5))
                 if squeeze_k not in (100, 120, 150):
                     squeeze_k = 100
                 bbw_min_col = f"bbw_min_{squeeze_k}"
@@ -301,7 +302,7 @@ class StrategyBNB:
                 vol_ma_20 = float(vol_ma_20)
                 volume_now = float(volume_now)
                 in_squeeze = bbw <= (bbw_min * 1.05)
-                volume_spike = vol_ma_20 > 0 and volume_now > (vol_ma_20 * 1.5)
+                volume_spike = vol_ma_20 > 0 and volume_now > (vol_ma_20 * vol_mult)
                 if not in_squeeze or not volume_spike:
                     continue
                 if close_val > bb_up:
