@@ -1,13 +1,14 @@
 """
-多幣種組合參數掃描 (Portfolio Sweep)
+多幣種組合參數掃描 (Portfolio Sweep) - 1D Macro Trend Following
 
 掃描網格：
-- K: (100, 120, 150)
-- VOL_MULT: (1.3, 1.5, 1.8)
-- ROC_WINDOW: (12, 24, 36)
+- Donchian N: (20, 55, 80)
+- EMA 慢線週期: (100, 200)
+- ROC 視窗: 固定 30 日
 
 固定參數：
-- Trailing ATR: 2.5
+- ATR 突破濾網: 1.0x ATR
+- Trailing ATR: 3.0
 - MAX_CONCURRENT: 2
 """
 from __future__ import annotations
@@ -41,11 +42,12 @@ BACKTEST_END = "2023-12-31"
 FEE_BPS = 9.0
 SLIPPAGE_BPS = 5.0
 
-K_VALS = (100, 120, 150)
-VOL_MULT_VALS = (1.3, 1.5, 1.8)
-ROC_WINDOW_VALS = (12, 24, 36)
+DONCHIAN_N_VALS = (20, 55, 80)
+EMA_SLOW_VALS = (100, 200)
+ROC_WINDOW = 30
 
-TRAILING_ATR_MULT = 2.5
+ATR_BREAK_FILTER = 1.0
+TRAILING_ATR_MULT = 3.0
 ATR_STOP_MULT_INIT = 2.5
 MAX_CONCURRENT = 2
 INITIAL_EQUITY_USDT = 10000.0
@@ -74,8 +76,12 @@ def build_client():
     )
 
 
-def build_strategy(k: int, vol_mult: float) -> StrategyBNB:
-    entry_th = {"squeeze_k": k, "vol_mult": vol_mult}
+def build_strategy(donchian_n: int, ema_slow_period: int) -> StrategyBNB:
+    entry_th = {
+        "macro_n": donchian_n,
+        "ema_slow_period": ema_slow_period,
+        "atr_break_mult": ATR_BREAK_FILTER,
+    }
     exit_rules = ExitRules(
         tp_r_mult=None,
         tp_atr_mult=None,
@@ -101,23 +107,45 @@ def _fetch_symbol_df(symbol: str) -> tuple[str, pd.DataFrame]:
     return symbol, df
 
 
+def resample_1h_to_1d(df: pd.DataFrame) -> pd.DataFrame:
+    if df.empty:
+        return df
+    out = df.copy()
+    out["timestamp"] = pd.to_datetime(out["timestamp"], utc=True)
+    out = out.set_index("timestamp").sort_index()
+    daily = (
+        out.resample("1D", closed="right", label="right")
+        .agg({
+            "open": "first",
+            "high": "max",
+            "low": "min",
+            "close": "last",
+            "volume": "sum",
+        })
+        .dropna(subset=["open", "high", "low", "close"])
+        .reset_index()
+    )
+    return daily
+
+
 async def load_all_symbol_data() -> dict[str, pd.DataFrame]:
     tasks = [asyncio.to_thread(_fetch_symbol_df, symbol) for symbol in SYMBOLS]
     out: dict[str, pd.DataFrame] = {}
     for symbol, df in await asyncio.gather(*tasks):
-        out[symbol] = df
+        daily = resample_1h_to_1d(df)
+        daily["roc"] = daily["close"].pct_change(ROC_WINDOW)
+        out[symbol] = daily
     return out
 
 
-def _run_single_symbol_backtest(symbol: str, df: pd.DataFrame, k: int, vol_mult: float, roc_window: int) -> list[PortfolioTrade]:
+def _run_single_symbol_backtest(symbol: str, df: pd.DataFrame, donchian_n: int, ema_slow_period: int) -> list[PortfolioTrade]:
     if df.empty:
         return []
 
     local_df = df.copy()
-    local_df["roc"] = local_df["close"].pct_change(roc_window)
     roc_map = dict(zip(pd.to_datetime(local_df["timestamp"], utc=True), local_df["roc"]))
 
-    strategy = build_strategy(k, vol_mult)
+    strategy = build_strategy(donchian_n, ema_slow_period)
     engine = BacktestEngineBNB(position_size_pct=0.02, max_trades_per_day=10)
     res = engine.run(
         strategy,
@@ -151,9 +179,15 @@ def _run_single_symbol_backtest(symbol: str, df: pd.DataFrame, k: int, vol_mult:
     return out
 
 
-async def run_combo(data_map: dict[str, pd.DataFrame], k: int, vol_mult: float, roc_window: int) -> tuple[list[PortfolioTrade], dict[str, int]]:
+async def run_combo(data_map: dict[str, pd.DataFrame], donchian_n: int, ema_slow_period: int) -> tuple[list[PortfolioTrade], dict[str, int]]:
     tasks = [
-        asyncio.to_thread(_run_single_symbol_backtest, symbol, data_map.get(symbol, pd.DataFrame()), k, vol_mult, roc_window)
+        asyncio.to_thread(
+            _run_single_symbol_backtest,
+            symbol,
+            data_map.get(symbol, pd.DataFrame()),
+            donchian_n,
+            ema_slow_period,
+        )
         for symbol in SYMBOLS
     ]
     result_lists = await asyncio.gather(*tasks)
@@ -168,7 +202,7 @@ def apply_portfolio_risk_limits(all_trades: list[PortfolioTrade]) -> tuple[list[
     trades = sorted(all_trades, key=lambda t: t.entry_time)
     buckets: dict[pd.Timestamp, list[PortfolioTrade]] = {}
     for tr in trades:
-        key = pd.Timestamp(tr.entry_time).floor("2h")
+        key = pd.Timestamp(tr.entry_time).floor("1D")
         buckets.setdefault(key, []).append(tr)
 
     rs_selected: list[PortfolioTrade] = []
@@ -244,8 +278,11 @@ def portfolio_metrics(trades: list[PortfolioTrade]) -> dict[str, float]:
 async def main():
     print("開始組合層級參數掃描 (Portfolio Sweep)")
     print(f"  Symbols: {', '.join(SYMBOLS)}")
-    print(f"  Grid: K={K_VALS}, VOL_MULT={VOL_MULT_VALS}, ROC_WINDOW={ROC_WINDOW_VALS}")
-    print(f"  Fixed: Trailing ATR={TRAILING_ATR_MULT}, MAX_CONCURRENT={MAX_CONCURRENT}")
+    print(f"  Grid: N={DONCHIAN_N_VALS}, EMA_SLOW={EMA_SLOW_VALS}, ROC_WINDOW={ROC_WINDOW}")
+    print(
+        f"  Fixed: ATR_BREAK={ATR_BREAK_FILTER}x, Trailing ATR={TRAILING_ATR_MULT}, "
+        f"MAX_CONCURRENT={MAX_CONCURRENT}"
+    )
     print("  Loading data once for all symbols...")
 
     data_map = await load_all_symbol_data()
@@ -254,26 +291,25 @@ async def main():
         print(f"    {symbol}: {size} bars")
 
     rows: list[dict[str, float]] = []
-    total = len(K_VALS) * len(VOL_MULT_VALS) * len(ROC_WINDOW_VALS)
+    total = len(DONCHIAN_N_VALS) * len(EMA_SLOW_VALS)
     idx = 0
-    for k in K_VALS:
-        for vol_mult in VOL_MULT_VALS:
-            for roc_window in ROC_WINDOW_VALS:
-                idx += 1
-                print(f"\n[{idx}/{total}] K={k}, Vol={vol_mult}, ROC={roc_window}")
-                accepted, skipped = await run_combo(data_map, k, vol_mult, roc_window)
-                m = portfolio_metrics(accepted)
-                rows.append({
-                    "k": float(k),
-                    "vol": float(vol_mult),
-                    "roc": float(roc_window),
-                    "trades": m["trades"],
-                    "skipped": float(skipped["skipped_total"]),
-                    "net_profit": m["net_profit"],
-                    "max_dd": m["max_drawdown_pct"],
-                    "pf": m["profit_factor"],
-                })
-                gc.collect()
+    for donchian_n in DONCHIAN_N_VALS:
+        for ema_slow in EMA_SLOW_VALS:
+            idx += 1
+            print(f"\n[{idx}/{total}] N={donchian_n}, EMA_SLOW={ema_slow}, ROC={ROC_WINDOW}")
+            accepted, skipped = await run_combo(data_map, donchian_n, ema_slow)
+            m = portfolio_metrics(accepted)
+            rows.append({
+                "n": float(donchian_n),
+                "ema_slow": float(ema_slow),
+                "roc": float(ROC_WINDOW),
+                "trades": m["trades"],
+                "skipped": float(skipped["skipped_total"]),
+                "net_profit": m["net_profit"],
+                "max_dd": m["max_drawdown_pct"],
+                "pf": m["profit_factor"],
+            })
+            gc.collect()
 
     rows_sorted = sorted(rows, key=lambda r: r["net_profit"], reverse=True)
     top10 = rows_sorted[:10]
@@ -281,31 +317,28 @@ async def main():
     print("\n" + "=" * 120)
     print("Top 10 組合 (依 Portfolio Net Profit 降序)")
     print("=" * 120)
-    print(f"{'K':<6}{'Vol':<8}{'ROC':<8}{'Trades':<10}{'Skipped':<10}{'NetProfit$':<14}{'MaxDD%':<10}{'PF':<8}")
+    print(f"{'N':<6}{'EMA':<8}{'ROC':<8}{'Trades':<10}{'Skipped':<10}{'NetProfit$':<14}{'MaxDD%':<10}{'PF':<8}")
     print("-" * 120)
     for r in top10:
         pf_str = f"{r['pf']:.2f}" if r["pf"] < 999 else ">999"
         print(
-            f"{int(r['k']):<6}{r['vol']:<8.1f}{int(r['roc']):<8}"
+            f"{int(r['n']):<6}{int(r['ema_slow']):<8}{int(r['roc']):<8}"
             f"{int(r['trades']):<10}{int(r['skipped']):<10}"
             f"{r['net_profit']:+14.2f}{r['max_dd']:<10.2f}{pf_str:<8}"
         )
     print("=" * 120)
 
-    robust = [
-        r for r in rows_sorted
-        if r["pf"] >= 1.0 and r["max_dd"] <= 5.0 and r["trades"] >= 50
-    ]
+    robust = [r for r in rows_sorted if r["pf"] >= 1.5]
     if robust:
-        print("\n⭐ 發現穩健正期望組合：")
+        print("\n⭐ 發現 PF >= 1.5 的組合：")
         for r in robust[:5]:
             print(
-                f"  K={int(r['k'])}, Vol={r['vol']:.1f}, ROC={int(r['roc'])} | "
+                f"  N={int(r['n'])}, EMA={int(r['ema_slow'])}, ROC={int(r['roc'])} | "
                 f"Trades={int(r['trades'])}, Skipped={int(r['skipped'])}, "
                 f"NetProfit={r['net_profit']:+.2f}, MaxDD={r['max_dd']:.2f}%, PF={r['pf']:.2f}"
             )
     else:
-        print("\n尚未發現符合條件 (PF>=1.0 且 MaxDD<=5.0% 且 Trades>=50) 的組合。")
+        print("\n尚未發現 PF >= 1.5 的組合。")
 
 
 if __name__ == "__main__":

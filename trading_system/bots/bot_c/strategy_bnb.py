@@ -53,8 +53,8 @@ def add_factor_columns(df: pd.DataFrame) -> pd.DataFrame:
     out["atr"] = atr
     out["volatility"] = (atr / close).fillna(0)
 
-    # 突破: 收盤突破前 N 根最高/最低（20/40/60 波動率突破；20/55/89 4H Donchian 宏觀）
-    for lb in (20, 40, 55, 60, 89):
+    # 突破: 收盤突破前 N 根最高/最低（含 1D Macro 需要的 N=20/55/80）
+    for lb in (20, 40, 55, 60, 80, 89):
         out[f"roll_high_{lb}"] = high.rolling(lb, min_periods=lb).max().shift(1)
         out[f"roll_low_{lb}"] = low.rolling(lb, min_periods=lb).min().shift(1)
     lookback = 20
@@ -84,6 +84,7 @@ def add_factor_columns(df: pd.DataFrame) -> pd.DataFrame:
     out["macd_below_signal"] = (out["macd_line"] < out["macd_signal"]).astype(int)
 
     # 趨勢過濾：EMA 100/200，供波動率突破與原策略
+    out["ema_50"] = close.ewm(span=50, adjust=False).mean()
     out["ema_100"] = close.ewm(span=100, adjust=False).mean()
     out["ema_200"] = close.ewm(span=200, adjust=False).mean()
     # 日線級別趨勢濾網：1200 根 4H ≈ 200 天，用於 4H 策略的 HTF 過濾 (EMA_200_1D)
@@ -263,6 +264,7 @@ class StrategyBNB:
         use_bb_reversion = "bb_n" in self.entry_thresholds
         use_donchian = "donchian_n" in self.entry_thresholds
         use_squeeze = "squeeze_k" in self.entry_thresholds
+        use_macro_1d = "macro_n" in self.entry_thresholds
 
         for i in range(1, n):
             row = df.iloc[i]
@@ -271,7 +273,58 @@ class StrategyBNB:
             bar_direction = self.direction
             tp_bb_mid: Optional[float] = None  # 逆勢回歸時 TP = 中軌
 
-            if use_squeeze:
+            if use_macro_1d:
+                # 1D 宏觀動能：LONG = close>EMA50 且 EMA50>EMA慢線 且 close>Donchian_High_N；
+                # SHORT = close<EMA50 且 EMA50<EMA慢線 且 close<Donchian_Low_N；
+                # 並要求突破 K 線振幅 > 1.0*ATR
+                macro_n = int(self.entry_thresholds.get("macro_n", 20))
+                if macro_n not in (20, 55, 80):
+                    macro_n = 20
+                ema_slow_period = int(self.entry_thresholds.get("ema_slow_period", 200))
+                if ema_slow_period not in (100, 200):
+                    ema_slow_period = 200
+                atr_break_mult = float(self.entry_thresholds.get("atr_break_mult", 1.0))
+
+                roll_high_col = f"roll_high_{macro_n}"
+                roll_low_col = f"roll_low_{macro_n}"
+                ema_slow_col = f"ema_{ema_slow_period}"
+                if (
+                    roll_high_col not in row.index
+                    or roll_low_col not in row.index
+                    or "ema_50" not in row.index
+                    or ema_slow_col not in row.index
+                    or "atr" not in row.index
+                ):
+                    continue
+
+                close_val = float(row["close"])
+                ema_fast = row.get("ema_50")
+                ema_slow = row.get(ema_slow_col)
+                roll_high_val = row.get(roll_high_col)
+                roll_low_val = row.get(roll_low_col)
+                atr_val = row.get("atr")
+                if pd.isna(ema_fast) or pd.isna(ema_slow) or pd.isna(roll_high_val) or pd.isna(roll_low_val) or pd.isna(atr_val):
+                    continue
+                ema_fast = float(ema_fast)
+                ema_slow = float(ema_slow)
+                roll_high_val = float(roll_high_val)
+                roll_low_val = float(roll_low_val)
+                atr_val = float(atr_val)
+                if atr_val <= 0:
+                    continue
+
+                bar_range = abs(float(row["high"]) - float(row["low"]))
+                strong_break = bar_range > (atr_break_mult * atr_val)
+                if not strong_break:
+                    continue
+
+                if close_val > ema_fast and ema_fast > ema_slow and close_val > roll_high_val:
+                    bar_direction = "long"
+                elif close_val < ema_fast and ema_fast < ema_slow and close_val < roll_low_val:
+                    bar_direction = "short"
+                else:
+                    continue
+            elif use_squeeze:
                 # 極嚴 Squeeze + 量能濾網：突破時需 Volume > vol_ma_20 * 1.5，過濾無量假突破
                 squeeze_k = int(self.entry_thresholds.get("squeeze_k", 100))
                 vol_mult = float(self.entry_thresholds.get("vol_mult", 1.5))
@@ -479,9 +532,9 @@ class StrategyBNB:
                 if score < required:
                     continue
 
-            # 趨勢過濾：非 regime 時僅在價格 > EMA200 做多、< EMA200 做空；squeeze/donchian/atr_breakout/bb_reversion 已自訂條件，跳過
+            # 趨勢過濾：非 regime 時僅在價格 > EMA200 做多、< EMA200 做空；macro/squeeze/donchian/atr_breakout/bb_reversion 已自訂條件，跳過
             close_val = float(row["close"])
-            if not use_squeeze and not use_donchian and not use_atr_breakout and not use_bb_reversion and not use_regime:
+            if not use_macro_1d and not use_squeeze and not use_donchian and not use_atr_breakout and not use_bb_reversion and not use_regime:
                 ema200 = row.get("ema_200")
                 if pd.notna(ema200):
                     ema200 = float(ema200)
@@ -520,8 +573,8 @@ class StrategyBNB:
             er = self.exit_rules
             tp_atr = getattr(er, "tp_atr_mult", None)
             use_bb_tp = use_bb_reversion and tp_bb_mid is not None
-            # Donchian / Squeeze：無固定 TP，僅 ATR 追蹤止損，設遠 TP 避免觸及
-            use_far_tp = use_donchian or use_squeeze
+            # Donchian / Squeeze / Macro：無固定 TP，僅 ATR 追蹤止損，設遠 TP 避免觸及
+            use_far_tp = use_donchian or use_squeeze or use_macro_1d
             far_tp_atr = 50.0
             if bar_direction == "long":
                 sl = close - er.sl_atr_mult * atr
