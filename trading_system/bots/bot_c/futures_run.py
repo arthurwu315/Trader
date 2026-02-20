@@ -456,6 +456,108 @@ def _save_risk_state(state: dict) -> None:
         pass
 
 
+def _parse_iso_utc(ts: str) -> datetime | None:
+    try:
+        if not ts:
+            return None
+        return datetime.fromisoformat(ts.replace("Z", "+00:00")).astimezone(timezone.utc)
+    except Exception:
+        return None
+
+
+def _load_signal_records() -> list[dict]:
+    if not SIGNALS_FILE.exists():
+        return []
+    try:
+        items = json.loads(SIGNALS_FILE.read_text(encoding="utf-8"))
+        return items if isinstance(items, list) else []
+    except Exception:
+        return []
+
+
+def _find_latest_entry_record(symbol: str) -> dict | None:
+    records = _load_signal_records()
+    for rec in reversed(records):
+        if str(rec.get("symbol", "")) == symbol and rec.get("time_utc"):
+            return rec
+    return None
+
+
+def _get_funding_fee_since(client, symbol: str, since_utc: datetime) -> float:
+    try:
+        items = client.get_income_history(symbol=symbol, limit=1000)
+        total = 0.0
+        cutoff_ms = int(since_utc.timestamp() * 1000)
+        for x in items or []:
+            if x.get("asset") != "USDT":
+                continue
+            if x.get("incomeType") != "FUNDING_FEE":
+                continue
+            t = int(x.get("time", 0) or 0)
+            if t < cutoff_ms:
+                continue
+            total += float(x.get("income", 0) or 0)
+        return total
+    except Exception:
+        return 0.0
+
+
+def _get_position_health_snapshot(client, symbol: str, pos: dict) -> tuple[str, str | None]:
+    """
+    回傳 (健康度文字, 可選警示文字)。
+    指標：持有天數、累積資費、MFE/MAE(ATR 倍數估計)。
+    """
+    rec = _find_latest_entry_record(symbol)
+    if not rec:
+        return f"{symbol}: 無入場審計紀錄，暫無健康度資料", None
+
+    entry_time_utc = _parse_iso_utc(str(rec.get("time_utc", "")))
+    if not entry_time_utc:
+        return f"{symbol}: 入場時間格式異常，暫無健康度資料", None
+
+    entry_price = float(rec.get("entry_price", pos.get("entryPrice", 0)) or 0)
+    sl_price = float(rec.get("sl_price", entry_price) or entry_price)
+    if entry_price <= 0:
+        return f"{symbol}: 入場價異常，暫無健康度資料", None
+
+    hold_days = max((datetime.now(timezone.utc) - entry_time_utc).total_seconds() / 86400.0, 0.0)
+    funding_fee = _get_funding_fee_since(client, symbol, entry_time_utc)
+
+    # 用入場 SL 反推 ATR（ATR_STOP_MULT=2.5）
+    atr_est = abs(entry_price - sl_price) / 2.5 if abs(entry_price - sl_price) > 0 else max(entry_price * 0.01, 1e-9)
+    start_ms = int(entry_time_utc.timestamp() * 1000)
+    kl = client.get_klines(symbol=symbol, interval="1d", limit=200, start_time=start_ms)
+    highs: list[float] = []
+    lows: list[float] = []
+    for row in kl or []:
+        try:
+            highs.append(float(row[2]))
+            lows.append(float(row[3]))
+        except Exception:
+            continue
+    if not highs or not lows:
+        return f"{symbol}: 持有 {hold_days:.1f} 天 | Funding {funding_fee:+.2f} USDT | MFE/MAE=N/A", None
+
+    side = str(pos.get("side", "")).upper()
+    if side == "BUY":
+        mfe = (max(highs) - entry_price) / atr_est
+        mae = (entry_price - min(lows)) / atr_est
+    else:
+        mfe = (entry_price - min(lows)) / atr_est
+        mae = (max(highs) - entry_price) / atr_est
+
+    upnl = float(pos.get("unrealizedProfit", 0) or 0)
+    warning = None
+    if upnl > 0 and funding_fee < 0 and abs(funding_fee) >= (0.1 * upnl):
+        warning = f"{symbol} 持有成本過高: Funding {funding_fee:+.2f} 已達浮盈 {upnl:+.2f} 的 10%以上"
+
+    line = (
+        f"{symbol}: 持有 {hold_days:.1f} 天 | Funding {funding_fee:+.2f} USDT | "
+        f"MFE {mfe:.2f} ATR / MAE {mae:.2f} ATR"
+    )
+    return line, warning
+
+
 def _get_daily_realized_pnl(client, symbol: str, hours: int = 24) -> float:
     """過去 hours 小時內已實現盈虧 + 資金費。失敗回傳 0，不拋錯。"""
     try:
@@ -651,6 +753,8 @@ def _send_macro_control_report(
     decision: str,
     warnings: list[str],
     real_leverage: float,
+    audit_lines: list[str],
+    health_lines: list[str],
 ) -> None:
     if not notifier or not getattr(notifier, "send_message", None):
         return
@@ -661,8 +765,11 @@ def _send_macro_control_report(
         f"💰 當前淨值: {equity:.2f} USDT ({equity_change_pct:+.2f}%)\n"
         f"🎯 RS 候選名單: {', '.join(top3) if top3 else 'None'}\n"
         f"🛡️ 決策結果: {decision}\n"
+        f"🧾 決策審計: {' | '.join(audit_lines) if audit_lines else '無'}\n"
+        f"🩺 持倉健康度: {' | '.join(health_lines) if health_lines else '無持倉'}\n"
         f"📐 真實槓桿率: {real_leverage:.2f}x\n"
-        f"⚠️ 異常提醒: {warn_txt}"
+        f"⚠️ 異常提醒: {warn_txt}\n"
+        "🆘 緊急指令預留: /close_all (目前僅保留說明，尚未啟用自動執行)"
     )
     try:
         notifier.send_message(msg)
@@ -686,6 +793,8 @@ def run_once(client, telegram_notifier=None, last_summary_date: str = "", last_s
     candidates: list[dict] = []
     candidate_symbols: list[str] = []
     warning_msgs: list[str] = []
+    audit_lines: list[str] = []
+    health_lines: list[str] = []
     decision_text = "續抱"
 
     if in_decision_window and last_scan_date != today_utc:
@@ -706,11 +815,16 @@ def run_once(client, telegram_notifier=None, last_summary_date: str = "", last_s
                     warning_msgs.append(
                         f"{symbol} 做空跳過: funding年化 {annual_funding*100:.2f}% > {FUNDING_SHORT_SKIP_ANNUAL*100:.0f}%"
                     )
+                    audit_lines.append(
+                        f"{symbol}: 年化資費 {annual_funding*100:.2f}% > {FUNDING_SHORT_SKIP_ANNUAL*100:.0f}%"
+                    )
                     continue
                 if abs(funding_rate) > FUNDING_ALERT_RATE:
                     warning_msgs.append(f"{symbol} Funding {funding_rate*100:.3f}%/8h 偏高")
                 if spread_pct > SPREAD_ALERT_PCT:
                     warning_msgs.append(f"{symbol} Spread {spread_pct:.3f}% 偏大")
+                    audit_lines.append(f"{symbol}: Spread {spread_pct:.3f}% > {SPREAD_ALERT_PCT:.3f}%")
+                    continue
                 candidates.append(
                     {
                         "symbol": symbol,
@@ -743,6 +857,10 @@ def run_once(client, telegram_notifier=None, last_summary_date: str = "", last_s
         )
         top3 = sorted(candidates, key=lambda x: abs(x["roc_30"]), reverse=True)[:3]
         top3_fmt = [f"{x['symbol']}({x['roc_30']:+.2%})" for x in top3]
+        rs_rank = sorted(candidates, key=lambda x: abs(x["roc_30"]), reverse=True)
+        for i, c in enumerate(rs_rank, start=1):
+            if selected and c["symbol"] != selected["symbol"]:
+                audit_lines.append(f"{c['symbol']}: RS 排名不足 (位居第 {i})")
 
         if selected:
             if risk_state.get("circuit_active", False):
@@ -824,6 +942,17 @@ def run_once(client, telegram_notifier=None, last_summary_date: str = "", last_s
 
         prev_equity = float(risk_state.get("last_report_equity", equity) or equity)
         equity_change_pct = ((equity - prev_equity) / prev_equity * 100.0) if prev_equity > 0 else 0.0
+
+        # 持倉健康度（天數 / 累積資費 / MFE/MAE）
+        for s in SYMBOLS:
+            pos = get_position_info(client, s)
+            if not pos:
+                continue
+            line, warn = _get_position_health_snapshot(client, s, pos)
+            health_lines.append(line)
+            if warn:
+                warning_msgs.append(warn)
+
         _send_macro_control_report(
             telegram_notifier,
             report_date=_now_taiwan().strftime("%Y-%m-%d"),
@@ -833,6 +962,8 @@ def run_once(client, telegram_notifier=None, last_summary_date: str = "", last_s
             decision=decision_text,
             warnings=warning_msgs,
             real_leverage=leverage_now,
+            audit_lines=audit_lines,
+            health_lines=health_lines,
         )
         risk_state["last_report_equity"] = equity
         risk_state["last_report_date"] = today_utc
