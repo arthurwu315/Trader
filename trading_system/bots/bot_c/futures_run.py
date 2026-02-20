@@ -83,6 +83,14 @@ SPREAD_ALERT_PCT = 0.15
 CIRCUIT_DRAWDOWN_PCT = 20.0
 CIRCUIT_COOLDOWN_HOURS = 48
 RISK_STATE_FILE = LOG_DIR / "paper_risk_state.json"
+ADMIN_CHAT_ID_ENV = os.getenv("ADMIN_CHAT_ID", "").strip()
+ALLOWED_CHAT_IDS = {
+    v.strip()
+    for v in os.getenv("ALLOWED_CHAT_IDS", "").split(",")
+    if v.strip()
+}
+if ADMIN_CHAT_ID_ENV:
+    ALLOWED_CHAT_IDS.add(ADMIN_CHAT_ID_ENV)
 # 每日總結觸發小時（目前=7 為測試用，驗證通知後請改回 8）
 SUMMARY_TRIGGER_HOUR = 8
 
@@ -858,6 +866,29 @@ def _poll_telegram_updates(bot_token: str, offset: int) -> tuple[list[dict], int
         return [], offset
 
 
+def _next_reconciliation_time_tw() -> str:
+    now_tw = _now_taiwan()
+    target = now_tw.replace(hour=8, minute=5, second=0, microsecond=0)
+    if now_tw >= target:
+        target = target + timedelta(days=1)
+    return target.strftime("%Y-%m-%d %H:%M:%S")
+
+
+def _build_status_message(client) -> str:
+    equity = _get_total_equity_usdt(client)
+    open_syms = sorted(_get_exchange_open_symbols(client))
+    risk_state = _load_risk_state()
+    locked = bool(risk_state.get("circuit_permanent_lock", False)) or bool(risk_state.get("circuit_active", False))
+    risk_text = "Locked" if locked else "Normal"
+    return (
+        "🛰️ <b>[系統狀態看板]</b>\n"
+        f"💰 當前淨值: {equity:.2f} USDT\n"
+        f"📌 當前持倉: {open_syms if open_syms else ['None']}\n"
+        f"🛡️ 風控狀態: {risk_text}\n"
+        f"🕒 下一次對帳時間: {_next_reconciliation_time_tw()} (UTC+8)"
+    )
+
+
 def _telegram_command_loop():
     """背景命令循環：/close_all 雙重確認。"""
     try:
@@ -868,6 +899,8 @@ def _telegram_command_loop():
         bot_token = str(notifier.bot_token)
         if not bot_token or not chat_id:
             return
+        allowed_ids = set(ALLOWED_CHAT_IDS)
+        allowed_ids.add(chat_id)
         cmd_client = get_client()
         offset = 0
         while True:
@@ -876,7 +909,7 @@ def _telegram_command_loop():
                 msg = u.get("message", {}) if isinstance(u, dict) else {}
                 text = str(msg.get("text", "") or "").strip()
                 from_chat = str((msg.get("chat") or {}).get("id", ""))
-                if from_chat != chat_id or not text:
+                if from_chat not in allowed_ids or not text:
                     continue
                 now_utc = datetime.now(timezone.utc)
                 state = _load_risk_state()
@@ -909,6 +942,43 @@ def _telegram_command_loop():
                         f"已嘗試平倉筆數: {closed_cnt}\n"
                         f"當前帳戶可用餘額: {balance:.2f} USDT\n"
                         "交易已永久鎖定（circuit_permanent_lock=true）。"
+                    )
+                elif text == "/unlock_trading":
+                    deadline = (now_utc + timedelta(seconds=30)).isoformat()
+                    state["unlock_confirm_deadline_utc"] = deadline
+                    _save_risk_state(state)
+                    notifier.send_message(
+                        "⚠️ 收到 /unlock_trading。\n"
+                        "確定要解除永久鎖定並恢復自動交易嗎？\n"
+                        "請在 30 秒內輸入 /confirm_unlock。"
+                    )
+                elif text == "/confirm_unlock":
+                    deadline = _parse_iso_utc(str(state.get("unlock_confirm_deadline_utc", "")))
+                    if not deadline or now_utc > deadline:
+                        notifier.send_message("❌ /confirm_unlock 超時，請重新輸入 /unlock_trading。")
+                        state.pop("unlock_confirm_deadline_utc", None)
+                        _save_risk_state(state)
+                        continue
+                    state["circuit_permanent_lock"] = False
+                    state["circuit_active"] = False
+                    state["circuit_until_utc"] = ""
+                    state["latest_drawdown_pct"] = 0.0
+                    state.pop("unlock_confirm_deadline_utc", None)
+                    _save_risk_state(state)
+                    notifier.send_message(
+                        "✅ <b>[系統已恢復]</b>\n"
+                        "交易鎖定已解除，監控中。\n"
+                        "下一個決策窗口為 08:05 (UTC+8)。"
+                    )
+                elif text == "/status":
+                    notifier.send_message(_build_status_message(cmd_client))
+                elif text == "/sync_now":
+                    ex = sorted(_get_exchange_open_symbols(cmd_client))
+                    state["expected_open_symbols"] = ex
+                    _save_risk_state(state)
+                    notifier.send_message(
+                        "🔄 <b>[手動對帳完成]</b>\n"
+                        f"交易所持倉已同步: {ex if ex else ['None']}"
                     )
             time.sleep(2)
     except Exception as e:
