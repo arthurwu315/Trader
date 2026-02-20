@@ -1,48 +1,31 @@
 """
-BNB/USDT 實盤接入檔 - 牛熊分治 (Regime-Specific)
-- 進場邏輯：三因子投票 (Funding Z, RSI Z, Price Breakout) + EMA200 趨勢
-- 牛熊分治：EMA200 之上用 LONG_Z（寬鬆做多），之下用 SHORT 門檻（嚴謹做空）
-- 風控：2% 硬止損、快速止盈、可選追蹤止盈
-- 當前部署：Calmar 13.9 優化 Short（Funding Z=0.62, RSI Z=2.0, SL ATR=2.0, TP ATR=2.5）
+1D 宏觀趨勢部署參數（Macro Portfolio Engine v1.0）
+- LONG: close > ema_50 且 ema_50 > ema_slow 且 close > roll_high_N
+- SHORT: close < ema_50 且 ema_50 < ema_slow 且 close < roll_low_N
+- ATR 突破濾網: (high - low) > ATR_BREAK_MULT * ATR
+- 出場: 3.0x ATR 追蹤（由策略引擎處理），此處提供進場與初始 SL
 """
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from typing import Any, Dict, Optional, Tuple
 
-# 牛熊分治 Z-Score 門檻
-LONG_Z_THRESH = 1.0
-LONG_MIN_SCORE = 1
-# Short 部署參數（Ratio 13.9 優化結果）
-SHORT_FUNDING_Z = 0.62
-SHORT_RSI_Z = 2.0
-SHORT_MIN_SCORE = 2
+# 1D Macro 最佳組合（由回測掃描結果寫入）
+DONCHIAN_N = 55
+EMA_SLOW_PERIOD = 100
+TRAILING_ATR_MULT = 3.0
+ATR_STOP_MULT = 2.5
+ATR_BREAK_MULT = 1.0
 
-# 動態非對稱波動率緩衝（Asymmetric Volatility-Adjusted Buffer）
-# BULL_THRESHOLD = EMA200 + (K_UP * ATR), BEAR_THRESHOLD = EMA200 - (K_DOWN * ATR)
-# 緩衝帶內維持前一小時狀態（Hysteresis）。對多頭嚴格、對空頭靈敏。
-K_UP = 1.5
-K_DOWN = 0.5
-
-# 與 best_strategy / 優化報告同步
 DEPLOY_PARAMS = {
-    "funding_z_long": LONG_Z_THRESH,
-    "rsi_z_long": LONG_Z_THRESH,
-    "min_score_long": LONG_MIN_SCORE,
-    "funding_z_short": SHORT_FUNDING_Z,
-    "rsi_z_short": SHORT_RSI_Z,
-    "min_score_short": SHORT_MIN_SCORE,
-    "price_breakout_long": 1.0,
-    "price_breakout_short": 1.0,
-    "sl_atr_mult": 2.0,
-    "tp_atr_mult": 2.5,
-    "trailing_stop_atr_mult": None,
-    "k_up": K_UP,
-    "k_down": K_DOWN,
+    "macro_n": DONCHIAN_N,
+    "ema_slow_period": EMA_SLOW_PERIOD,
+    "trailing_atr_mult": TRAILING_ATR_MULT,
+    "atr_stop_mult": ATR_STOP_MULT,
+    "atr_break_mult": ATR_BREAK_MULT,
 }
 
-# 風控常數
-# 2% 硬止損 @ 3x 槓桿：單筆對本金傷害 = 2% × 3 × (margin/equity)；依 risk 0.25% 反推倉位時約 0.25% 本金
 HARD_STOP_POSITION_PCT = 2.0
 POSITION_SIZE = 0.02
 
@@ -60,99 +43,71 @@ class SignalOut:
     regime: str  # "bull" | "bear"
 
 
-def _vote_score_long(row: Dict[str, Any], z_thresh: float) -> int:
-    """做多三因子：Funding Z <= -z_thresh, RSI Z <= -z_thresh, Price Breakout Long."""
-    score = 0
-    z_f = row.get("funding_z_score", 0)
-    if z_f is not None and not (isinstance(z_f, float) and (z_f != z_f)):
-        if float(z_f) <= -z_thresh:
-            score += 1
-    z_r = row.get("rsi_z_score", 0)
-    if z_r is not None and not (isinstance(z_r, float) and (z_r != z_r)):
-        if float(z_r) <= -z_thresh:
-            score += 1
-    if row.get("price_breakout_long", 0) >= 1:
-        score += 1
-    return score
-
-
-def _vote_score_short(
-    row: Dict[str, Any],
-    funding_z_thresh: float,
-    rsi_z_thresh: float,
-) -> int:
-    """做空三因子：Funding Z >= funding_z_thresh, RSI Z >= rsi_z_thresh, Price Breakout Short."""
-    score = 0
-    z_f = row.get("funding_z_score", 0)
-    if z_f is not None and not (isinstance(z_f, float) and (z_f != z_f)):
-        if float(z_f) >= funding_z_thresh:
-            score += 1
-    z_r = row.get("rsi_z_score", 0)
-    if z_r is not None and not (isinstance(z_r, float) and (z_r != z_r)):
-        if float(z_r) >= rsi_z_thresh:
-            score += 1
-    if row.get("price_breakout_short", 0) >= 1:
-        score += 1
-    return score
-
-
-def _get_regime_with_buffer(
-    close: float,
-    ema200: float,
-    atr: float,
-    k_up: float,
-    k_down: float,
-    last_regime: Optional[str] = None,
-) -> str:
-    """動態非對稱緩衝：BULL = EMA200 + K_UP*ATR, BEAR = EMA200 - K_DOWN*ATR；緩衝帶內維持 last_regime。"""
-    bull_thresh = ema200 + k_up * atr
-    bear_thresh = ema200 - k_down * atr
-    if close >= bull_thresh:
-        return "bull"
-    if close <= bear_thresh:
-        return "bear"
-    if last_regime in ("bull", "bear"):
-        return last_regime
-    return "bear"
-
-
 def get_signal_from_row(
     row: Dict[str, Any],
     params: Optional[Dict[str, Any]] = None,
     last_regime: Optional[str] = None,
 ) -> Tuple[Optional[SignalOut], str]:
     """
-    牛熊分治 + 動態非對稱波動率緩衝（ATR 緩衝帶內維持前一小時狀態）。
+    1D 宏觀趨勢：
+    LONG = close > ema_50 且 ema_50 > ema_slow 且 close > 過去 N 根最高價
+    SHORT = close < ema_50 且 ema_50 < ema_slow 且 close < 過去 N 根最低價
+    並要求 (high-low) > ATR_BREAK_MULT * ATR。
     回傳 (signal_or_none, current_regime)。
     """
     p = params or DEPLOY_PARAMS
     close = float(row["close"])
-    ema200 = row.get("ema_200")
-    if ema200 is None or (isinstance(ema200, float) and ema200 != ema200):
-        ema200 = close
-    else:
-        ema200 = float(ema200)
     atr = float(row.get("atr", 0.0))
     if atr <= 0:
         atr = close * 0.02
-    k_up = float(p.get("k_up", K_UP))
-    k_down = float(p.get("k_down", K_DOWN))
-    regime = _get_regime_with_buffer(close, ema200, atr, k_up, k_down, last_regime)
 
-    if regime == "bull":
-        # 資金費率過濾：多頭過熱時抑制做多以節省利息
-        funding_z = row.get("funding_z_score")
-        if funding_z is not None and isinstance(funding_z, (int, float)) and float(funding_z) > 0.5:
-            return None, regime
-        z_thresh = p.get("funding_z_long", LONG_Z_THRESH)
-        min_score = int(p.get("min_score_long", LONG_MIN_SCORE))
-        score = _vote_score_long(row, z_thresh)
-        if score < min_score:
-            return None, regime
-        sl_atr = p.get("sl_atr_mult", 1.5)
-        tp_atr = p.get("tp_atr_mult", 2.5)
-        sl_price = close - sl_atr * atr
-        tp_price = close + tp_atr * atr
+    donchian_n = int(p.get("macro_n", DONCHIAN_N))
+    if donchian_n not in (20, 55, 80):
+        donchian_n = 55
+    ema_slow_period = int(p.get("ema_slow_period", EMA_SLOW_PERIOD))
+    if ema_slow_period not in (100, 200):
+        ema_slow_period = 100
+    atr_stop = float(p.get("atr_stop_mult", ATR_STOP_MULT))
+    atr_break_mult = float(p.get("atr_break_mult", ATR_BREAK_MULT))
+
+    roll_high_col = f"roll_high_{donchian_n}"
+    roll_low_col = f"roll_low_{donchian_n}"
+    ema_slow_col = f"ema_{ema_slow_period}"
+    roll_high_val = row.get(roll_high_col)
+    roll_low_val = row.get(roll_low_col)
+    ema_fast_val = row.get("ema_50")
+    ema_slow_val = row.get(ema_slow_col)
+    if roll_high_val is None or roll_low_val is None or ema_fast_val is None or ema_slow_val is None:
+        regime = last_regime if last_regime in ("bull", "bear") else "bear"
+        return None, regime
+    if isinstance(roll_high_val, float) and math.isnan(roll_high_val):
+        regime = last_regime if last_regime in ("bull", "bear") else "bear"
+        return None, regime
+    if isinstance(roll_low_val, float) and math.isnan(roll_low_val):
+        regime = last_regime if last_regime in ("bull", "bear") else "bear"
+        return None, regime
+    if isinstance(ema_fast_val, float) and math.isnan(ema_fast_val):
+        regime = last_regime if last_regime in ("bull", "bear") else "bear"
+        return None, regime
+    if isinstance(ema_slow_val, float) and math.isnan(ema_slow_val):
+        regime = last_regime if last_regime in ("bull", "bear") else "bear"
+        return None, regime
+    roll_high_val = float(roll_high_val)
+    roll_low_val = float(roll_low_val)
+    ema_fast_val = float(ema_fast_val)
+    ema_slow_val = float(ema_slow_val)
+    bar_range = abs(float(row["high"]) - float(row["low"]))
+    if bar_range <= (atr_break_mult * atr):
+        regime = "bull" if close > ema_slow_val else "bear"
+        return None, regime
+
+    # 無固定 TP，設遠價僅供介面；實務出場靠追蹤止損
+    tp_far_mult = 50.0
+
+    if close > ema_fast_val and ema_fast_val > ema_slow_val and close > roll_high_val:
+        regime = "bull"
+        sl_price = close - atr_stop * atr
+        tp_price = close + tp_far_mult * atr
         hard_stop_price = close * (1 - HARD_STOP_POSITION_PCT / 100.0)
         return SignalOut(
             should_enter=True,
@@ -164,17 +119,10 @@ def get_signal_from_row(
             atr=atr,
             regime=regime,
         ), regime
-    else:
-        fz = p.get("funding_z_short", SHORT_FUNDING_Z)
-        rz = p.get("rsi_z_short", SHORT_RSI_Z)
-        min_score = int(p.get("min_score_short", SHORT_MIN_SCORE))
-        score = _vote_score_short(row, fz, rz)
-        if score < min_score:
-            return None, regime
-        sl_atr = p.get("sl_atr_mult", 1.5)
-        tp_atr = p.get("tp_atr_mult", 2.5)
-        sl_price = close + sl_atr * atr
-        tp_price = close - tp_atr * atr
+    if close < ema_fast_val and ema_fast_val < ema_slow_val and close < roll_low_val:
+        regime = "bear"
+        sl_price = close + atr_stop * atr
+        tp_price = close - tp_far_mult * atr
         hard_stop_price = close * (1 + HARD_STOP_POSITION_PCT / 100.0)
         return SignalOut(
             should_enter=True,
@@ -187,23 +135,19 @@ def get_signal_from_row(
             regime=regime,
         ), regime
 
+    regime = last_regime if last_regime in ("bull", "bear") else "bear"
+    return None, regime
+
 
 def get_deploy_params() -> Dict[str, Any]:
-    """回傳目前部署參數（含牛熊門檻、動態緩衝 K_UP/K_DOWN 與風控）。"""
     return {
         **DEPLOY_PARAMS,
-        "long_z_thresh": LONG_Z_THRESH,
-        "short_funding_z": SHORT_FUNDING_Z,
-        "short_rsi_z": SHORT_RSI_Z,
         "hard_stop_position_pct": HARD_STOP_POSITION_PCT,
         "position_size": POSITION_SIZE,
-        "k_up": K_UP,
-        "k_down": K_DOWN,
     }
 
 
 def check_hard_stop(side: str, entry_price: float, current_high: float, current_low: float) -> bool:
-    """檢查是否觸及 2% 硬止損。Long: low <= entry*0.98；Short: high >= entry*1.02。"""
     thresh = entry_price * (HARD_STOP_POSITION_PCT / 100.0)
     if side == "BUY":
         return current_low <= entry_price - thresh
@@ -215,11 +159,11 @@ def apply_trailing_tp(
     entry_price: float,
     current_tp: float,
     atr: float,
-    trailing_atr_mult: float,
+    trailing_atr_mult: Optional[float],
     bar_high: float,
     bar_low: float,
 ) -> float:
-    """追蹤止盈：有利移動時鎖利。"""
+    """4H 宏觀：寬幅 ATR 追蹤止損，趨勢不回頭則持續持倉。"""
     if trailing_atr_mult is None or trailing_atr_mult <= 0:
         return current_tp
     if side == "BUY" and bar_high > entry_price:
@@ -234,9 +178,14 @@ def apply_trailing_tp(
 
 
 if __name__ == "__main__":
-    print("deploy_ready: 牛熊分治門檻已載入 (Short: Funding Z=0.62, RSI Z=2.0, SL ATR=2.0, TP ATR=2.5)")
-    print("  LONG_Z_THRESH (牛市做多):", LONG_Z_THRESH)
-    print("  SHORT_FUNDING_Z / SHORT_RSI_Z (熊市做空):", SHORT_FUNDING_Z, SHORT_RSI_Z)
-    print("  EMA200 過濾：僅在價格 < EMA200 時允許做空，防止狂暴牛市逆勢空")
-    print("  HARD_STOP_POSITION_PCT:", HARD_STOP_POSITION_PCT)
-    print("  DEPLOY_PARAMS:", get_deploy_params())
+    print("deploy_ready: 1D 宏觀趨勢引擎")
+    print(
+        "  N:",
+        DONCHIAN_N,
+        "EMA_SLOW:",
+        EMA_SLOW_PERIOD,
+        "TRAIL:",
+        TRAILING_ATR_MULT,
+        "ATR_BREAK:",
+        ATR_BREAK_MULT,
+    )
