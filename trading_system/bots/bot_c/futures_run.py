@@ -889,6 +889,43 @@ def _build_status_message(client) -> str:
     )
 
 
+def _build_help_message() -> str:
+    return (
+        "🤖 <b>1D Macro Bot 控制中心 (v1.0)</b>\n"
+        "-------------------------\n"
+        "📈 <b>狀態監控</b>\n"
+        "/status - 查看淨值、持倉、風控狀態\n"
+        "/sync_now - 強制執行帳實對帳\n\n"
+        "🛡️ <b>安全控制</b>\n"
+        "/close_all - 緊急清倉並永久鎖定 (核按鈕)\n"
+        "/unlock_trading - 解除熔斷與永久鎖定\n\n"
+        "📜 <b>目前參數</b>\n"
+        "策略: 1D Donchian (N=55)\n"
+        "風控: 50% Notional / 2 倉位\n"
+        "權限: 已鎖定白名單管理員"
+    )
+
+
+def _ensure_runtime_files() -> None:
+    ensure_log_dir()
+    # 初始化風險狀態檔，並設定僅擁有者可讀寫
+    if not RISK_STATE_FILE.exists():
+        _save_risk_state(
+            {
+                "month_key": _now_taiwan().strftime("%Y-%m"),
+                "month_peak_equity": 0.0,
+                "latest_drawdown_pct": 0.0,
+                "circuit_active": False,
+                "circuit_permanent_lock": False,
+                "expected_open_symbols": [],
+            }
+        )
+    try:
+        os.chmod(RISK_STATE_FILE, 0o600)
+    except Exception:
+        pass
+
+
 def _telegram_command_loop():
     """背景命令循環：/close_all 雙重確認。"""
     try:
@@ -980,6 +1017,8 @@ def _telegram_command_loop():
                         "🔄 <b>[手動對帳完成]</b>\n"
                         f"交易所持倉已同步: {ex if ex else ['None']}"
                     )
+                elif text == "/help":
+                    notifier.send_message(_build_help_message())
             time.sleep(2)
     except Exception as e:
         print(f"  [WARN] Telegram 指令循環異常: {e}")
@@ -1241,7 +1280,7 @@ def trim_log_lines(log_path: Path, keep_lines: int = 10000) -> None:
 def main():
     print("Futures 實戰啟動：1D 宏觀組合引擎，每日 UTC 00:05~00:15 (UTC+8 08:05~08:15) 掃描一次")
     print(f"  監控幣種數: {len(SYMBOLS)} | MAX_CONCURRENT: {MAX_CONCURRENT}")
-    ensure_log_dir()
+    _ensure_runtime_files()
     trim_log_lines(LOG_DIR / "paper_out.log", 10000)
     trim_log_lines(LOG_DIR / "paper_err.log", 10000)
 
