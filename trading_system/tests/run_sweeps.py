@@ -1,8 +1,7 @@
 """
-1H 波動率壓縮突破 (Volatility Squeeze) 參數掃描。
-Squeeze = BBW < bbw_mean_K * 0.8；LONG = Squeeze 且 close > BB_UP 且 close > ema_100_1h；SHORT = Squeeze 且 close < BB_LOW 且 close < ema_100_1h。
-出場：1h ATR Trailing Stop。
-掃描 K=(50, 80)、Trail=(3.0, 4.0)。產出 Top 5：NetProfit, MaxDD, Trades, PF。
+1H 極嚴 Squeeze 參數掃描（回歸極簡、鎖死勝率）。
+Squeeze = 當前 BBW <= bbw_min_K * 1.05；LONG = Squeeze 且 Close > BB_UP；SHORT = Squeeze 且 Close < BB_LOW。出場：1h ATR Trailing。
+掃描 K=(100, 120, 150)、Trail=(2.0, 2.5, 3.0)。產出 Top 5：NetProfit, MaxDD, Trades, PF。
 使用方式：cd /home/trader/trading_system && python3 -m tests.run_sweeps
 """
 from __future__ import annotations
@@ -37,10 +36,10 @@ INITIAL_EQUITY_USDT = 10000.0
 MIN_PROFIT_FACTOR = 1.0
 BACKTEST_YEARS = 2.0
 
-# 波動率壓縮突破：BBW 觀察期 K、Trailing ATR Mult
-SQUEEZE_K_VALS = (50, 80)
-TRAILING_ATR_MULT_VALS = (3.0, 4.0)
-ATR_STOP_MULT_INIT = 3.0
+# 極嚴 Squeeze：深度壓縮 K、Trailing ATR Mult
+SQUEEZE_K_VALS = (100, 120, 150)
+TRAILING_ATR_MULT_VALS = (2.0, 2.5, 3.0)
+ATR_STOP_MULT_INIT = 2.5
 
 
 def load_data():
@@ -55,8 +54,8 @@ def load_data():
     start_dt = datetime.strptime(BACKTEST_START, "%Y-%m-%d").replace(tzinfo=timezone.utc)
     end_dt = datetime.strptime(BACKTEST_END, "%Y-%m-%d").replace(tzinfo=timezone.utc)
     df = fetch_klines_df(client, SYMBOL, INTERVAL, start_dt, end_dt)
-    if df.empty or len(df) < 100:
-        raise ValueError(f"1h 資料不足: {len(df)} 根。需至少 100 根（含 BBW mean 80）")
+    if df.empty or len(df) < 155:
+        raise ValueError(f"1h 資料不足: {len(df)} 根。需至少 155 根（含 bbw_min_150）")
     return df
 
 
@@ -157,7 +156,7 @@ def main():
     gc.collect()
     engine = BacktestEngineBNB(position_size_pct=POSITION_SIZE, max_trades_per_day=10)
 
-    print("\n[1] 掃描：Squeeze K × Trailing ATR Mult（K=50,80；Trail=3.0,4.0）...")
+    print("\n[1] 掃描：極嚴 Squeeze K × Trailing ATR Mult（K=100,120,150；Trail=2.0,2.5,3.0）...")
     rows = run_grid(data, engine)
     gc.collect()
 
@@ -165,7 +164,7 @@ def main():
     top5 = rows_sorted[:5]
 
     print("\n" + "=" * 110)
-    print("Top 5 組合 (1H Squeeze + EMA100 趨勢濾網) — NetProfit, MaxDD, Trades, PF")
+    print("Top 5 組合 (1H 極嚴 Squeeze) — NetProfit, MaxDD, Trades, PF")
     print("=" * 110)
     print(f"{'K':<5} {'Trail':<6} {'Trades':<7} {'NetProfit$':<11} {'PF':<6} {'MaxDD%':<7} {'AnnRet%':<8} {'Payoff':<6}")
     print("-" * 110)

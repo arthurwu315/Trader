@@ -98,16 +98,13 @@ def add_factor_columns(df: pd.DataFrame) -> pd.DataFrame:
             out[f"bb_up_{bb_n}_{key}"] = sma + mult * std
             out[f"bb_low_{bb_n}_{key}"] = sma - mult * std
 
-    # 布林帶寬度 BBW = (BB_UP - BB_LOW) / BB_MID；過去 K 根平均 BBW 供放寬 Squeeze 判定 (BBW < mean_K * 0.8)
+    # 布林帶寬度 BBW = (BB_UP - BB_LOW) / BB_MID；過去 K 根最低 BBW 供極嚴 Squeeze（BBW <= bbw_min_K * 1.05）
     bb_mid_20 = out["bb_mid_20"]
     bb_up_20 = out["bb_up_20_2p0"]
     bb_low_20 = out["bb_low_20_2p0"]
     out["bbw"] = (bb_up_20 - bb_low_20) / bb_mid_20.replace(0, np.nan).fillna(1.0)
-    for k in (50, 80):
-        out[f"bbw_mean_{k}"] = out["bbw"].rolling(k, min_periods=k).mean().shift(1)
-
-    # 1H 趨勢濾網：EMA100
-    out["ema_100_1h"] = close.ewm(span=100, adjust=False).mean()
+    for k in (100, 120, 150):
+        out[f"bbw_min_{k}"] = out["bbw"].rolling(k, min_periods=k).min().shift(1)
 
     return out
 
@@ -274,32 +271,30 @@ class StrategyBNB:
             tp_bb_mid: Optional[float] = None  # 逆勢回歸時 TP = 中軌
 
             if use_squeeze:
-                # 波動率壓縮突破（放寬）：Squeeze = BBW < bbw_mean_K * 0.8；LONG = Squeeze 且 close > BB_UP 且 close > ema_100_1h；SHORT = Squeeze 且 close < BB_LOW 且 close < ema_100_1h
-                squeeze_k = int(self.entry_thresholds.get("squeeze_k", 50))
-                if squeeze_k not in (50, 80):
-                    squeeze_k = 50
-                bbw_mean_col = f"bbw_mean_{squeeze_k}"
-                if bbw_mean_col not in row.index or "bbw" not in row.index or "bb_up_20_2p0" not in row.index or "bb_low_20_2p0" not in row.index or "ema_100_1h" not in row.index:
+                # 極嚴 Squeeze：bbw_min_K = BBW.rolling(K).min().shift(1)；Squeeze = 當前 BBW <= bbw_min_K * 1.05；LONG = Squeeze 且 Close > BB_UP，SHORT = Squeeze 且 Close < BB_LOW
+                squeeze_k = int(self.entry_thresholds.get("squeeze_k", 100))
+                if squeeze_k not in (100, 120, 150):
+                    squeeze_k = 100
+                bbw_min_col = f"bbw_min_{squeeze_k}"
+                if bbw_min_col not in row.index or "bbw" not in row.index or "bb_up_20_2p0" not in row.index or "bb_low_20_2p0" not in row.index:
                     continue
                 close_val = float(row["close"])
                 bbw = row.get("bbw")
-                bbw_mean = row.get(bbw_mean_col)
+                bbw_min = row.get(bbw_min_col)
                 bb_up = row.get("bb_up_20_2p0")
                 bb_low = row.get("bb_low_20_2p0")
-                ema_100_1h = row.get("ema_100_1h")
-                if pd.isna(bbw) or pd.isna(bbw_mean) or pd.isna(bb_up) or pd.isna(bb_low) or pd.isna(ema_100_1h):
+                if pd.isna(bbw) or pd.isna(bbw_min) or pd.isna(bb_up) or pd.isna(bb_low):
                     continue
                 bbw = float(bbw)
-                bbw_mean = float(bbw_mean)
+                bbw_min = float(bbw_min)
                 bb_up = float(bb_up)
                 bb_low = float(bb_low)
-                ema_100_1h = float(ema_100_1h)
-                in_squeeze = bbw < (bbw_mean * 0.8)
+                in_squeeze = bbw <= (bbw_min * 1.05)
                 if not in_squeeze:
                     continue
-                if close_val > bb_up and close_val > ema_100_1h:
+                if close_val > bb_up:
                     bar_direction = "long"
-                elif close_val < bb_low and close_val < ema_100_1h:
+                elif close_val < bb_low:
                     bar_direction = "short"
                 else:
                     continue
