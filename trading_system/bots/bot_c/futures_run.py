@@ -880,12 +880,15 @@ def _build_status_message(client) -> str:
     risk_state = _load_risk_state()
     locked = bool(risk_state.get("circuit_permanent_lock", False)) or bool(risk_state.get("circuit_active", False))
     risk_text = "Locked" if locked else "Normal"
+    now_str = datetime.now(TZ_TAIWAN).strftime("%Y-%m-%d %H:%M:%S")
     return (
         "🛰️ <b>[系統狀態看板]</b>\n"
         f"💰 當前淨值: {equity:.2f} USDT\n"
         f"📌 當前持倉: {open_syms if open_syms else ['None']}\n"
         f"🛡️ 風控狀態: {risk_text}\n"
-        f"🕒 下一次對帳時間: {_next_reconciliation_time_tw()} (UTC+8)"
+        f"🕒 更新時間: {now_str} (UTC+8)\n"
+        "🔄 資料來源: Binance 即時查詢\n"
+        f"🧮 下一次對帳時間: {_next_reconciliation_time_tw()} (UTC+8)"
     )
 
 
@@ -960,6 +963,8 @@ def _telegram_command_loop():
                         "請在 30 秒內輸入 /confirm_kill 以執行全平倉與永久熔斷。"
                     )
                 elif text == "/confirm_kill":
+                    # 強制即時查詢：每次執行核按鈕都重建 client
+                    cmd_client = get_client()
                     deadline = _parse_iso_utc(str(state.get("kill_confirm_deadline_utc", "")))
                     if not deadline or now_utc > deadline:
                         notifier.send_message("❌ /confirm_kill 超時，請重新輸入 /close_all。")
@@ -1008,8 +1013,12 @@ def _telegram_command_loop():
                         "下一個決策窗口為 08:05 (UTC+8)。"
                     )
                 elif text == "/status":
+                    # 強制即時查詢：status 不使用舊 client 狀態
+                    cmd_client = get_client()
                     notifier.send_message(_build_status_message(cmd_client))
                 elif text == "/sync_now":
+                    # 強制即時查詢：sync_now 重新建立 client 並覆蓋本地狀態
+                    cmd_client = get_client()
                     ex = sorted(_get_exchange_open_symbols(cmd_client))
                     state["expected_open_symbols"] = ex
                     _save_risk_state(state)
