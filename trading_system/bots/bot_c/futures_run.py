@@ -1001,58 +1001,61 @@ def _build_scan_message(client) -> str:
     breakout_candidates: list[dict] = []
 
     for symbol in MONITOR_SYMBOLS:
-        merged, _, _ = fetch_merged_row(client, symbol)
-        if merged is None:
-            reason_store[symbol] = "[資料不足] K線不足"
-            continue
-
-        close = float(merged.get("close", 0) or 0)
-        if close <= 0:
-            reason_store[symbol] = "[資料異常] close<=0"
-            continue
-        roll_high = merged.get(f"roll_high_{n}")
-        roll_low = merged.get(f"roll_low_{n}")
-        ema_val = merged.get(f"ema_{ema_slow}")
-        if roll_high is None or roll_low is None or ema_val is None:
-            reason_store[symbol] = "[過濾中] 指標尚未就緒"
-            continue
-        roll_high = float(roll_high)
-        roll_low = float(roll_low)
-        ema_val = float(ema_val)
-        dist_long = ((roll_high - close) / close) * 100.0
-        dist_short = ((close - roll_low) / close) * 100.0
-        near = min(abs(dist_long), abs(dist_short))
-        if near < 3.0:
-            if abs(dist_long) <= abs(dist_short):
-                opportunities.append((symbol, dist_long, "LONG"))
-            else:
-                opportunities.append((symbol, dist_short, "SHORT"))
-
-        signal, _ = get_signal_from_row(merged, params, last_regime=None)
-        if signal and signal.should_enter:
-            funding_rate = _get_funding_rate(client, symbol)
-            spread_pct = _get_spread_pct(client, symbol)
-            annual_funding = max(funding_rate, 0.0) * 3.0 * 365.0
-            if signal.side == "SELL" and annual_funding > FUNDING_SHORT_SKIP_ANNUAL:
-                reason_store[symbol] = f"[資費過高] 年化 {annual_funding*100:.2f}%"
+        try:
+            merged, _, _ = fetch_merged_row(client, symbol)
+            if merged is None:
+                reason_store[symbol] = "[資料不足] K線不足"
                 continue
-            if spread_pct > SPREAD_ALERT_PCT:
-                reason_store[symbol] = f"[盤整中] Spread {spread_pct:.3f}%"
+
+            close = float(merged.get("close", 0) or 0)
+            if close <= 0:
+                reason_store[symbol] = "[資料異常] close<=0"
                 continue
-            breakout_candidates.append(
-                {
-                    "symbol": symbol,
-                    "side": signal.side,
-                    "roc_30": float(merged.get("roc_30", 0.0) or 0.0),
-                }
-            )
-        else:
-            if close < ema_val:
-                reason_store[symbol] = "[過濾中] 價格在 EMA 下方"
-            elif max(abs(dist_long), abs(dist_short)) > 5.0:
-                reason_store[symbol] = "[盤整中] 距離突破口 > 5%"
+            roll_high = merged.get(f"roll_high_{n}")
+            roll_low = merged.get(f"roll_low_{n}")
+            ema_val = merged.get(f"ema_{ema_slow}")
+            if roll_high is None or roll_low is None or ema_val is None:
+                reason_store[symbol] = "[過濾中] 指標尚未就緒"
+                continue
+            roll_high = float(roll_high)
+            roll_low = float(roll_low)
+            ema_val = float(ema_val)
+            dist_long = ((roll_high - close) / close) * 100.0
+            dist_short = ((close - roll_low) / close) * 100.0
+            near = min(abs(dist_long), abs(dist_short))
+            if near < 3.0:
+                if abs(dist_long) <= abs(dist_short):
+                    opportunities.append((symbol, dist_long, "LONG"))
+                else:
+                    opportunities.append((symbol, dist_short, "SHORT"))
+
+            signal, _ = get_signal_from_row(merged, params, last_regime=None)
+            if signal and signal.should_enter:
+                funding_rate = _get_funding_rate(client, symbol)
+                spread_pct = _get_spread_pct(client, symbol)
+                annual_funding = max(funding_rate, 0.0) * 3.0 * 365.0
+                if signal.side == "SELL" and annual_funding > FUNDING_SHORT_SKIP_ANNUAL:
+                    reason_store[symbol] = f"[資費過高] 年化 {annual_funding*100:.2f}%"
+                    continue
+                if spread_pct > SPREAD_ALERT_PCT:
+                    reason_store[symbol] = f"[盤整中] Spread {spread_pct:.3f}%"
+                    continue
+                breakout_candidates.append(
+                    {
+                        "symbol": symbol,
+                        "side": signal.side,
+                        "roc_30": float(merged.get("roc_30", 0.0) or 0.0),
+                    }
+                )
             else:
-                reason_store[symbol] = "[盤整中] 尚未觸發突破"
+                if close < ema_val:
+                    reason_store[symbol] = "[過濾中] 價格在 EMA 下方"
+                elif max(abs(dist_long), abs(dist_short)) > 5.0:
+                    reason_store[symbol] = "[盤整中] 距離突破口 > 5%"
+                else:
+                    reason_store[symbol] = "[盤整中] 尚未觸發突破"
+        except Exception as e:
+            reason_store[symbol] = f"[掃描錯誤] {type(e).__name__}"
 
     selected = _select_rs_candidates(breakout_candidates, slots=MAX_CONCURRENT)
     selected_set = {x["symbol"] for x in selected}
@@ -1081,6 +1084,16 @@ def _build_scan_message(client) -> str:
         "💤 <b>觀察中 / 原因診斷</b>\n"
         f"{chr(10).join(diag_lines) if diag_lines else 'None'}"
     )
+
+
+def _handle_scan_command(notifier) -> None:
+    # DEBUG 第一時間確認指令已到達
+    notifier.send_message("DEBUG: 已接收到掃描指令")
+    try:
+        cmd_client = get_client()
+        notifier.send_message(_build_scan_message(cmd_client))
+    except Exception as e:
+        notifier.send_message(f"❌ /scan 執行失敗：{e}")
 
 
 def _refresh_monitor_symbols(client) -> None:
@@ -1123,6 +1136,10 @@ def _telegram_command_loop():
         allowed_ids = set(ALLOWED_CHAT_IDS)
         allowed_ids.add(chat_id)
         cmd_client = get_client()
+        # 指令註冊表（本腳本使用輪詢架構，等效於 CommandHandler 註冊）
+        command_registry = {
+            "/scan": _handle_scan_command,
+        }
         offset = 0
         while True:
             updates, offset = _poll_telegram_updates(bot_token, offset)
@@ -1220,11 +1237,7 @@ def _telegram_command_loop():
                 elif text == "/help":
                     notifier.send_message(_build_help_message())
                 elif text == "/scan":
-                    try:
-                        cmd_client = get_client()
-                        notifier.send_message(_build_scan_message(cmd_client))
-                    except Exception as e:
-                        notifier.send_message(f"❌ /scan 執行失敗：{e}")
+                    command_registry["/scan"](notifier)
             time.sleep(2)
     except Exception as e:
         print(f"  [WARN] Telegram 指令循環異常: {e}")
