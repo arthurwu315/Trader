@@ -946,7 +946,8 @@ def _build_status_message(client) -> str:
         f"🛡️ 風控狀態: {risk_text}\n"
         f"🕒 更新時間: {now_str} (UTC+8)\n"
         "🔄 資料來源: Binance 即時查詢\n"
-        f"🧮 下一次對帳時間: {_next_reconciliation_time_tw()} (UTC+8)"
+        f"🧮 下一次對帳時間: {_next_reconciliation_time_tw()} (UTC+8)\n"
+        "💡 輸入 /scan 查看 50 檔幣種的進場預警與診斷。"
     )
 
 
@@ -957,6 +958,8 @@ def _build_help_message() -> str:
         "📈 <b>狀態監控</b>\n"
         "/status - 查看淨值、持倉、風控狀態\n"
         "/sync_now - 強制執行帳實對帳\n\n"
+        "🔍 <b>市場掃描</b>\n"
+        "/scan - 查看 50 檔進場預警與未達標原因\n\n"
         "🛡️ <b>安全控制</b>\n"
         "/close_all - 緊急清倉並永久鎖定 (核按鈕)\n"
         "/unlock_trading - 解除熔斷與永久鎖定\n\n"
@@ -964,6 +967,119 @@ def _build_help_message() -> str:
         "策略: 1D Donchian (N=55)\n"
         "風控: 50% Notional / 2 倉位\n"
         "權限: 已鎖定白名單管理員"
+    )
+
+
+def _select_rs_candidates(candidates: list[dict], slots: int) -> list[dict]:
+    if slots <= 0 or not candidates:
+        return []
+    longs = [c for c in candidates if c["side"] == "BUY"]
+    shorts = [c for c in candidates if c["side"] == "SELL"]
+    ranked_longs = sorted(longs, key=lambda x: x["roc_30"], reverse=True)
+    ranked_shorts = sorted(shorts, key=lambda x: x["roc_30"])
+    long_top = abs(ranked_longs[0]["roc_30"]) if ranked_longs else -1.0
+    short_top = abs(ranked_shorts[0]["roc_30"]) if ranked_shorts else -1.0
+    if long_top >= short_top and ranked_longs:
+        return ranked_longs[:slots]
+    if ranked_shorts:
+        return ranked_shorts[:slots]
+    return []
+
+
+def _build_scan_message(client) -> str:
+    from bots.bot_c.deploy_ready import get_signal_from_row, get_deploy_params
+
+    _refresh_monitor_symbols(client)
+    params = get_deploy_params()
+    n = int(params.get("macro_n", 55))
+    ema_slow = int(params.get("ema_slow_period", 100))
+    now_str = datetime.now(TZ_TAIWAN).strftime("%Y-%m-%d %H:%M:%S")
+    equity = _get_total_equity_usdt(client)
+
+    reason_store: dict[str, str] = {}
+    opportunities: list[tuple[str, float, str]] = []
+    breakout_candidates: list[dict] = []
+
+    for symbol in MONITOR_SYMBOLS:
+        merged, _, _ = fetch_merged_row(client, symbol)
+        if merged is None:
+            reason_store[symbol] = "[資料不足] K線不足"
+            continue
+
+        close = float(merged.get("close", 0) or 0)
+        if close <= 0:
+            reason_store[symbol] = "[資料異常] close<=0"
+            continue
+        roll_high = merged.get(f"roll_high_{n}")
+        roll_low = merged.get(f"roll_low_{n}")
+        ema_val = merged.get(f"ema_{ema_slow}")
+        if roll_high is None or roll_low is None or ema_val is None:
+            reason_store[symbol] = "[過濾中] 指標尚未就緒"
+            continue
+        roll_high = float(roll_high)
+        roll_low = float(roll_low)
+        ema_val = float(ema_val)
+        dist_long = ((roll_high - close) / close) * 100.0
+        dist_short = ((close - roll_low) / close) * 100.0
+        near = min(abs(dist_long), abs(dist_short))
+        if near < 3.0:
+            if abs(dist_long) <= abs(dist_short):
+                opportunities.append((symbol, dist_long, "LONG"))
+            else:
+                opportunities.append((symbol, dist_short, "SHORT"))
+
+        signal, _ = get_signal_from_row(merged, params, last_regime=None)
+        if signal and signal.should_enter:
+            funding_rate = _get_funding_rate(client, symbol)
+            spread_pct = _get_spread_pct(client, symbol)
+            annual_funding = max(funding_rate, 0.0) * 3.0 * 365.0
+            if signal.side == "SELL" and annual_funding > FUNDING_SHORT_SKIP_ANNUAL:
+                reason_store[symbol] = f"[資費過高] 年化 {annual_funding*100:.2f}%"
+                continue
+            if spread_pct > SPREAD_ALERT_PCT:
+                reason_store[symbol] = f"[盤整中] Spread {spread_pct:.3f}%"
+                continue
+            breakout_candidates.append(
+                {
+                    "symbol": symbol,
+                    "side": signal.side,
+                    "roc_30": float(merged.get("roc_30", 0.0) or 0.0),
+                }
+            )
+        else:
+            if close < ema_val:
+                reason_store[symbol] = "[過濾中] 價格在 EMA 下方"
+            elif max(abs(dist_long), abs(dist_short)) > 5.0:
+                reason_store[symbol] = "[盤整中] 距離突破口 > 5%"
+            else:
+                reason_store[symbol] = "[盤整中] 尚未觸發突破"
+
+    selected = _select_rs_candidates(breakout_candidates, slots=MAX_CONCURRENT)
+    selected_set = {x["symbol"] for x in selected}
+    for c in breakout_candidates:
+        if c["symbol"] not in selected_set:
+            reason_store[c["symbol"]] = "[RS排名後段] 雖突破但未進前2"
+        else:
+            reason_store[c["symbol"]] = f"[已入選] {c['side']} ROC={c['roc_30']:+.2%}"
+
+    opp_sorted = sorted(opportunities, key=lambda x: abs(x[1]))
+    hot_lines = [f"{s}: 距離{d:+.2f}% ({side})" for s, d, side in opp_sorted[:12]]
+
+    # 精簡輸出：先顯示機會與前段診斷，避免超過 4096 字元
+    diag_lines = []
+    for sym in MONITOR_SYMBOLS:
+        if sym in reason_store:
+            diag_lines.append(f"{sym}: {reason_store[sym]}")
+    diag_lines = diag_lines[:28]
+
+    return (
+        "🔍 <b>全市場監控報告 (50 Symbols)</b>\n"
+        f"🕒 掃描時間: {now_str} (UTC+8)\n"
+        f"💰 當前資產: {equity:.2f} USDT\n\n"
+        "🔥 <b>潛在機會 (距離突破口 < 3%)</b>\n"
+        f"{chr(10).join(hot_lines) if hot_lines else 'None'}\n\n"
+        "⚠️ <b>排除/診斷</b>\n"
+        f"{chr(10).join(diag_lines) if diag_lines else 'None'}"
     )
 
 
@@ -1103,6 +1219,9 @@ def _telegram_command_loop():
                     )
                 elif text == "/help":
                     notifier.send_message(_build_help_message())
+                elif text == "/scan":
+                    cmd_client = get_client()
+                    notifier.send_message(_build_scan_message(cmd_client))
             time.sleep(2)
     except Exception as e:
         print(f"  [WARN] Telegram 指令循環異常: {e}")
