@@ -12,6 +12,7 @@ import os
 import sys
 import threading
 import time
+import concurrent.futures as cf
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 
@@ -919,6 +920,43 @@ def _poll_telegram_updates(bot_token: str, offset: int) -> tuple[list[dict], int
         return [], offset
 
 
+def _tg_send_plain(bot_token: str, chat_id: str, text: str) -> int | None:
+    """純文字送訊息（不帶 parse_mode，避免 Markdown/HTML 解析失敗）。"""
+    try:
+        url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
+        resp = requests.post(
+            url,
+            json={"chat_id": chat_id, "text": text, "disable_web_page_preview": True},
+            timeout=8,
+        )
+        data = resp.json() if resp.status_code == 200 else {}
+        if isinstance(data, dict) and data.get("ok") and isinstance(data.get("result"), dict):
+            return data["result"].get("message_id")
+    except Exception:
+        pass
+    return None
+
+
+def _tg_edit_plain(bot_token: str, chat_id: str, message_id: int, text: str) -> bool:
+    try:
+        url = f"https://api.telegram.org/bot{bot_token}/editMessageText"
+        resp = requests.post(
+            url,
+            json={"chat_id": chat_id, "message_id": message_id, "text": text, "disable_web_page_preview": True},
+            timeout=8,
+        )
+        data = resp.json() if resp.status_code == 200 else {}
+        return bool(isinstance(data, dict) and data.get("ok"))
+    except Exception:
+        return False
+
+
+def _fetch_merged_row_with_timeout(client, symbol: str, timeout_sec: float = 3.0):
+    with cf.ThreadPoolExecutor(max_workers=1) as pool:
+        fut = pool.submit(fetch_merged_row, client, symbol)
+        return fut.result(timeout=timeout_sec)
+
+
 def _next_reconciliation_time_tw() -> str:
     now_tw = _now_taiwan()
     target = now_tw.replace(hour=8, minute=5, second=0, microsecond=0)
@@ -1086,14 +1124,133 @@ def _build_scan_message(client) -> str:
     )
 
 
-def _handle_scan_command(notifier) -> None:
+def _handle_scan_command(notifier, bot_token: str, chat_id: str) -> None:
     # DEBUG 第一時間確認指令已到達
-    notifier.send_message("DEBUG: 已接收到掃描指令")
+    notifier.send_message("DEBUG: 已接收到掃描指令", parse_mode=None)
     try:
+        from bots.bot_c.deploy_ready import get_signal_from_row, get_deploy_params
+
         cmd_client = get_client()
-        notifier.send_message(_build_scan_message(cmd_client))
+        _refresh_monitor_symbols(cmd_client)
+        params = get_deploy_params()
+        n = int(params.get("macro_n", 55))
+        ema_slow = int(params.get("ema_slow_period", 100))
+        total = len(MONITOR_SYMBOLS)
+        equity = _get_total_equity_usdt(cmd_client)
+
+        progress_id = _tg_send_plain(bot_token, chat_id, f"⏳ 掃描中: 0/{total} ...")
+        reason_store: dict[str, str] = {}
+        opportunities: list[tuple[str, float, str]] = []
+        breakout_candidates: list[dict] = []
+        batch_lines: list[str] = []
+
+        for idx, symbol in enumerate(MONITOR_SYMBOLS, start=1):
+            try:
+                merged, _, _ = _fetch_merged_row_with_timeout(cmd_client, symbol, timeout_sec=3.0)
+                if merged is None:
+                    reason = "[資料不足] K線不足"
+                    reason_store[symbol] = reason
+                    batch_lines.append(f"{symbol}: {reason}")
+                    continue
+
+                close = float(merged.get("close", 0) or 0)
+                if close <= 0:
+                    reason = "[資料異常] close<=0"
+                    reason_store[symbol] = reason
+                    batch_lines.append(f"{symbol}: {reason}")
+                    continue
+
+                roll_high = merged.get(f"roll_high_{n}")
+                roll_low = merged.get(f"roll_low_{n}")
+                ema_val = merged.get(f"ema_{ema_slow}")
+                if roll_high is None or roll_low is None or ema_val is None:
+                    reason = "[過濾中] 指標尚未就緒"
+                    reason_store[symbol] = reason
+                    batch_lines.append(f"{symbol}: {reason}")
+                    continue
+
+                roll_high = float(roll_high)
+                roll_low = float(roll_low)
+                ema_val = float(ema_val)
+                dist_long = ((roll_high - close) / close) * 100.0
+                dist_short = ((close - roll_low) / close) * 100.0
+                near = min(abs(dist_long), abs(dist_short))
+                if near < 3.0:
+                    if abs(dist_long) <= abs(dist_short):
+                        opportunities.append((symbol, dist_long, "LONG"))
+                    else:
+                        opportunities.append((symbol, dist_short, "SHORT"))
+
+                signal, _ = get_signal_from_row(merged, params, last_regime=None)
+                if signal and signal.should_enter:
+                    funding_rate = _get_funding_rate(cmd_client, symbol)
+                    spread_pct = _get_spread_pct(cmd_client, symbol)
+                    annual_funding = max(funding_rate, 0.0) * 3.0 * 365.0
+                    if signal.side == "SELL" and annual_funding > FUNDING_SHORT_SKIP_ANNUAL:
+                        reason = f"[資費過高] 年化 {annual_funding*100:.2f}%"
+                        reason_store[symbol] = reason
+                        batch_lines.append(f"{symbol}: {reason}")
+                        continue
+                    if spread_pct > SPREAD_ALERT_PCT:
+                        reason = f"[盤整中] Spread {spread_pct:.3f}%"
+                        reason_store[symbol] = reason
+                        batch_lines.append(f"{symbol}: {reason}")
+                        continue
+                    breakout_candidates.append(
+                        {"symbol": symbol, "side": signal.side, "roc_30": float(merged.get("roc_30", 0.0) or 0.0)}
+                    )
+                    batch_lines.append(f"{symbol}: [候選] {signal.side} ROC={float(merged.get('roc_30', 0.0) or 0.0):+.2%}")
+                else:
+                    if close < ema_val:
+                        reason = "[過濾中] 價格在 EMA 下方"
+                    elif max(abs(dist_long), abs(dist_short)) > 5.0:
+                        reason = "[盤整中] 距離突破口 > 5%"
+                    else:
+                        reason = "[盤整中] 尚未觸發突破"
+                    reason_store[symbol] = reason
+                    batch_lines.append(f"{symbol}: {reason}")
+            except cf.TimeoutError:
+                reason_store[symbol] = "[超時] 單幣掃描 > 3s，已跳過"
+                batch_lines.append(f"{symbol}: [超時] >3s")
+            except Exception as e:
+                reason_store[symbol] = f"[掃描錯誤] {type(e).__name__}"
+                batch_lines.append(f"{symbol}: [錯誤] {type(e).__name__}")
+
+            if idx % 10 == 0 or idx == total:
+                if progress_id:
+                    _tg_edit_plain(bot_token, chat_id, progress_id, f"⏳ 掃描中: {idx}/{total} ...")
+                _tg_send_plain(
+                    bot_token,
+                    chat_id,
+                    f"🔎 掃描分段 {max(1, idx-9)}-{idx}/{total}\n" + "\n".join(batch_lines[-10:]),
+                )
+
+        selected = _select_rs_candidates(breakout_candidates, slots=MAX_CONCURRENT)
+        selected_set = {x["symbol"] for x in selected}
+        for c in breakout_candidates:
+            if c["symbol"] not in selected_set:
+                reason_store[c["symbol"]] = "[RS排名後段] 雖突破但未進前2"
+            else:
+                reason_store[c["symbol"]] = f"[已入選] {c['side']} ROC={c['roc_30']:+.2%}"
+
+        opp_sorted = sorted(opportunities, key=lambda x: abs(x[1]))
+        hot_lines = [f"{s}: 距離{d:+.2f}% ({side})" for s, d, side in opp_sorted[:12]]
+        diag_lines = [f"{sym}: {reason_store[sym]}" for sym in MONITOR_SYMBOLS if sym in reason_store][:28]
+        now_str = datetime.now(TZ_TAIWAN).strftime("%Y-%m-%d %H:%M:%S")
+        summary = (
+            "🔍 50 幣種宏觀預警報告\n"
+            f"🕒 掃描時間: {now_str} (UTC+8)\n"
+            f"💰 當前資產: {equity:.2f} USDT\n\n"
+            "🔥 接近突破 (距離 < 3%)\n"
+            f"{chr(10).join(hot_lines) if hot_lines else 'None'}\n\n"
+            "💤 觀察中\n"
+            f"{chr(10).join(diag_lines) if diag_lines else 'None'}"
+        )
+        _tg_send_plain(bot_token, chat_id, summary)
+        if progress_id:
+            _tg_edit_plain(bot_token, chat_id, progress_id, f"✅ 掃描完成: {total}/{total}")
     except Exception as e:
-        notifier.send_message(f"❌ /scan 執行失敗：{e}")
+        notifier.send_message(f"❌ /scan 執行失敗：{e}", parse_mode=None)
 
 
 def _refresh_monitor_symbols(client) -> None:
@@ -1138,7 +1295,7 @@ def _telegram_command_loop():
         cmd_client = get_client()
         # 指令註冊表（本腳本使用輪詢架構，等效於 CommandHandler 註冊）
         command_registry = {
-            "/scan": _handle_scan_command,
+            "/scan": lambda n: _handle_scan_command(n, bot_token, chat_id),
         }
         offset = 0
         while True:
