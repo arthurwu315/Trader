@@ -1076,9 +1076,9 @@ def _build_scan_message(client) -> str:
         "🔍 <b>全市場監控報告 (50 Symbols)</b>\n"
         f"🕒 掃描時間: {now_str} (UTC+8)\n"
         f"💰 當前資產: {equity:.2f} USDT\n\n"
-        "🔥 <b>潛在機會 (距離突破口 < 3%)</b>\n"
+        "🔥 <b>接近突破 (距離 < 3%)</b>\n"
         f"{chr(10).join(hot_lines) if hot_lines else 'None'}\n\n"
-        "⚠️ <b>排除/診斷</b>\n"
+        "💤 <b>觀察中 / 原因診斷</b>\n"
         f"{chr(10).join(diag_lines) if diag_lines else 'None'}"
     )
 
@@ -1220,8 +1220,11 @@ def _telegram_command_loop():
                 elif text == "/help":
                     notifier.send_message(_build_help_message())
                 elif text == "/scan":
-                    cmd_client = get_client()
-                    notifier.send_message(_build_scan_message(cmd_client))
+                    try:
+                        cmd_client = get_client()
+                        notifier.send_message(_build_scan_message(cmd_client))
+                    except Exception as e:
+                        notifier.send_message(f"❌ /scan 執行失敗：{e}")
             time.sleep(2)
     except Exception as e:
         print(f"  [WARN] Telegram 指令循環異常: {e}")
