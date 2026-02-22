@@ -1,9 +1,9 @@
 """
-1D 宏觀趨勢部署參數（Macro Portfolio Engine v1.0）
+1D 宏觀趨勢部署參數（Macro Portfolio Engine v1.5-DualGate）
 - LONG: close > ema_50 且 ema_50 > ema_slow 且 close > roll_high_N
 - SHORT: close < ema_50 且 ema_50 < ema_slow 且 close < roll_low_N
 - ATR 突破濾網: (high - low) > ATR_BREAK_MULT * ATR
-- 出場: 3.0x ATR 追蹤（由策略引擎處理），此處提供進場與初始 SL
+- 出場: 2.5x ATR 追蹤（由策略引擎處理），此處提供進場與初始 SL
 """
 from __future__ import annotations
 
@@ -11,10 +11,10 @@ import math
 from dataclasses import dataclass
 from typing import Any, Dict, Optional, Tuple
 
-# 1D Macro 最佳組合（由回測掃描結果寫入）
-DONCHIAN_N = 55
-EMA_SLOW_PERIOD = 100
-TRAILING_ATR_MULT = 3.0
+# 1D Macro v1.5-DualGate Conservative
+DONCHIAN_N = 80
+EMA_SLOW_PERIOD = 200
+TRAILING_ATR_MULT = 2.5
 ATR_STOP_MULT = 2.5
 ATR_BREAK_MULT = 1.0
 
@@ -63,10 +63,10 @@ def get_signal_from_row(
 
     donchian_n = int(p.get("macro_n", DONCHIAN_N))
     if donchian_n not in (20, 55, 80):
-        donchian_n = 55
+        donchian_n = 80
     ema_slow_period = int(p.get("ema_slow_period", EMA_SLOW_PERIOD))
     if ema_slow_period not in (100, 200):
-        ema_slow_period = 100
+        ema_slow_period = 200
     atr_stop = float(p.get("atr_stop_mult", ATR_STOP_MULT))
     atr_break_mult = float(p.get("atr_break_mult", ATR_BREAK_MULT))
 
@@ -178,7 +178,7 @@ def apply_trailing_tp(
 
 
 if __name__ == "__main__":
-    print("deploy_ready: 1D 宏觀趨勢引擎")
+    print("deploy_ready: 1D 宏觀趨勢引擎 v1.5-DualGate")
     print(
         "  N:",
         DONCHIAN_N,

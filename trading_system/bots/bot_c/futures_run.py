@@ -46,11 +46,15 @@ try:
 except Exception:
     pass
 
-MONITOR_SYMBOLS = [
-    "BTCUSDT", "ETHUSDT", "BNBUSDT", "SOLUSDT", "AVAXUSDT",
-    "ADAUSDT", "XRPUSDT", "DOTUSDT", "LINKUSDT", "LTCUSDT",
-    "BCHUSDT", "MATICUSDT", "UNIUSDT", "ICPUSDT", "NEARUSDT",
+STRATEGY_VERSION = "v2.0-A+C-DualEngine"
+# C Group（Top50 + 流動性過濾）固定 20 幣清單
+C_GROUP_SYMBOLS = [
+    "BTCUSDT", "ETHUSDT", "SOLUSDT", "XRPUSDT", "OPNUSDT",
+    "AZTECUSDT", "DOGEUSDT", "1000PEPEUSDT", "ENSOUSDT", "BNBUSDT",
+    "ESPUSDT", "INJUSDT", "ZECUSDT", "BCHUSDT", "SIRENUSDT",
+    "YGGUSDT", "POWERUSDT", "KITEUSDT", "ETCUSDT", "PIPPINUSDT",
 ]
+MONITOR_SYMBOLS = list(C_GROUP_SYMBOLS)
 PRIMARY_SYMBOL = MONITOR_SYMBOLS[0]
 # 決策週期 1d：每天 UTC 00:05~00:15（台灣 08:05~08:15）評估一次
 INTERVAL_ENTRY = "1d"
@@ -76,12 +80,20 @@ HARD_STOP_PCT = 2.0   # 2% 硬止損
 LEVERAGE = 3
 RISK_PCT_OF_EQUITY = 0.0025  # 0.25% 風險
 MAX_CONCURRENT = 2
-NOTIONAL_PCT_OF_EQUITY = 0.50
+NOTIONAL_PCT_OF_EQUITY = 0.40
+NOTIONAL_REDUCED_PCT = 0.30
+DRAWDOWN_REDUCE_NOTIONAL_PCT = 12.0
+# v2.0: 策略層基礎倉位（以總淨值百分比）
+STRAT_A_BASE_NOTIONAL_PCT = 0.40
+STRAT_C_BASE_NOTIONAL_PCT = 0.80
+# v2.0: STRAT_C 微型驗證模式（最小名義金額）
+TEST_MODE = os.getenv("TEST_MODE", "true").strip().lower() in {"1", "true", "yes", "on"}
+TEST_MODE_MIN_NOTIONAL_USDT = float(os.getenv("TEST_MODE_MIN_NOTIONAL_USDT", "10"))
 LEVERAGE_WARN_THRESHOLD = 1.5
 FUNDING_ALERT_RATE = 0.0005      # 0.05% / 8h
 FUNDING_SHORT_SKIP_ANNUAL = 0.20 # 做空年化資費 > 20% 則跳過
 SPREAD_ALERT_PCT = 0.15
-CIRCUIT_DRAWDOWN_PCT = 20.0
+CIRCUIT_DRAWDOWN_PCT = 25.0
 CIRCUIT_COOLDOWN_HOURS = 48
 RISK_STATE_FILE = LOG_DIR / "paper_risk_state.json"
 ADMIN_CHAT_ID_ENV = os.getenv("ADMIN_CHAT_ID", "").strip()
@@ -94,6 +106,7 @@ if ADMIN_CHAT_ID_ENV:
     ALLOWED_CHAT_IDS.add(ADMIN_CHAT_ID_ENV)
 # 每日總結觸發小時（目前=7 為測試用，驗證通知後請改回 8）
 SUMMARY_TRIGGER_HOUR = 8
+C_MICRO_STOP_HOURS = 3
 
 
 def get_client():
@@ -425,6 +438,142 @@ def _compute_qty_by_notional(equity_usdt: float, entry_price: float, notional_pc
         return 0.0
     notional = equity_usdt * notional_pct
     return round(notional / entry_price, 3)
+
+
+def _get_effective_notional_pct(risk_state: dict) -> float:
+    dd = float(risk_state.get("latest_drawdown_pct", 0.0) or 0.0)
+    if dd >= DRAWDOWN_REDUCE_NOTIONAL_PCT:
+        return NOTIONAL_REDUCED_PCT
+    return NOTIONAL_PCT_OF_EQUITY
+
+
+def _get_effective_strategy_notional_pct(
+    risk_state: dict,
+    base_pct: float,
+    signal_mult: float = 1.0,
+) -> float:
+    dd = float(risk_state.get("latest_drawdown_pct", 0.0) or 0.0)
+    if dd >= DRAWDOWN_REDUCE_NOTIONAL_PCT:
+        base = min(base_pct, NOTIONAL_REDUCED_PCT)
+    else:
+        base = base_pct
+    mult = max(0.5, min(signal_mult, 1.8))
+    return max(0.05, min(base * mult, 1.8))
+
+
+def _compute_qty_test_mode(entry_price: float) -> float:
+    if entry_price <= 0:
+        return 0.0
+    return round(TEST_MODE_MIN_NOTIONAL_USDT / entry_price, 3)
+
+
+def get_btc_regime(client) -> str:
+    """BTC 大盤濾鏡：BTC > EMA200 => bull，否則 bear。"""
+    try:
+        merged, _, _ = fetch_merged_row(client, "BTCUSDT")
+        if not merged:
+            return "unknown"
+        close = float(merged.get("close", 0) or 0)
+        ema200 = float(merged.get("ema_200", 0) or 0)
+        if close <= 0 or ema200 <= 0:
+            return "unknown"
+        return "bull" if close > ema200 else "bear"
+    except Exception:
+        return "unknown"
+
+
+def _compute_rsi(series, period: int = 14):
+    delta = series.diff()
+    up = delta.clip(lower=0).rolling(period).mean()
+    down = (-delta.clip(upper=0)).rolling(period).mean()
+    rs = up / down.replace(0, float("nan"))
+    return 100 - (100 / (1 + rs))
+
+
+def _calc_c_signal_from_1h(df, symbol: str, funding_rate: float) -> dict | None:
+    """STRAT_C: 1H 極端撿屍 + 高低波動分群 + 清算代理條件。"""
+    if df is None or len(df) < 120:
+        return None
+    row = df.iloc[-2]  # 僅使用已收盤 1h K
+    close = float(row["close"])
+    open_ = float(row["open"])
+    high = float(row["high"])
+    low = float(row["low"])
+    atr = float(row.get("atr_14", 0) or 0)
+    if close <= 0 or atr <= 0:
+        return None
+    vol = float(row.get("volume", 0) or 0)
+    vol50 = float(row.get("vol_sma50", 0) or 0)
+    rsi = float(row.get("rsi_14", 0) or 0)
+    bb_mid = float(row.get("bb_mid", 0) or 0)
+    bb_up = float(row.get("bb_up", 0) or 0)
+    bb_low = float(row.get("bb_low", 0) or 0)
+    if bb_mid <= 0 or bb_up <= 0 or bb_low <= 0:
+        return None
+
+    rng = max(high - low, 1e-9)
+    lower_reclaim = (close - low) / rng
+    upper_reject = (high - close) / rng
+    std = abs(bb_up - bb_mid) / 2.0 if abs(bb_up - bb_mid) > 0 else abs(bb_mid) * 0.005
+    bb_up_25 = bb_mid + 2.5 * std
+    bb_low_25 = bb_mid - 2.5 * std
+    bb_up_30 = bb_mid + 3.0 * std
+    bb_low_30 = bb_mid - 3.0 * std
+
+    high_vol = {
+        "1000PEPEUSDT", "AZTECUSDT", "ENSOUSDT", "ESPUSDT", "INJUSDT",
+        "KITEUSDT", "PIPPINUSDT", "POWERUSDT", "SIRENUSDT", "YGGUSDT",
+    }
+    is_high_vol = symbol in high_vol
+    # Funding filter: 避免逆勢高成本。
+    long_ok = funding_rate <= 0.0004
+    short_ok = funding_rate >= -0.0004
+
+    # 清算潮代理：爆量+長/上影回收，搭配 funding 極值。
+    if vol50 > 0 and vol > 3.0 * vol50 and lower_reclaim > 0.60 and close > open_ and funding_rate <= -0.0004:
+        score = (vol / vol50) + abs(funding_rate) * 10000.0 + lower_reclaim
+        return {"side": "BUY", "entry_price": close, "sl_price": close - 1.0 * atr, "score": score, "strategy": "C"}
+    if vol50 > 0 and vol > 3.0 * vol50 and upper_reject > 0.60 and close < open_ and funding_rate >= 0.0004:
+        score = (vol / vol50) + abs(funding_rate) * 10000.0 + upper_reject
+        return {"side": "SELL", "entry_price": close, "sl_price": close + 1.0 * atr, "score": score, "strategy": "C"}
+
+    # 常規極端撿屍（高波動組更嚴格）
+    if is_high_vol:
+        if close < bb_low_30 and rsi < 10 and long_ok:
+            return {"side": "BUY", "entry_price": close, "sl_price": close - 1.0 * atr, "score": 1.4, "strategy": "C"}
+        if close > bb_up_30 and rsi > 90 and short_ok:
+            return {"side": "SELL", "entry_price": close, "sl_price": close + 1.0 * atr, "score": 1.4, "strategy": "C"}
+    else:
+        if close < bb_low_25 and rsi < 15 and long_ok:
+            return {"side": "BUY", "entry_price": close, "sl_price": close - 1.0 * atr, "score": 1.2, "strategy": "C"}
+        if close > bb_up_25 and rsi > 85 and short_ok:
+            return {"side": "SELL", "entry_price": close, "sl_price": close + 1.0 * atr, "score": 1.2, "strategy": "C"}
+    return None
+
+
+def _fetch_1h_with_indicators(client, symbol: str, limit: int = 320):
+    import pandas as pd
+    df = fetch_klines(client, symbol, "1h", limit)
+    if df is None or len(df) < 120:
+        return None
+    out = df.copy()
+    prev_close = out["close"].shift(1)
+    tr = pd.concat(
+        [
+            out["high"] - out["low"],
+            (out["high"] - prev_close).abs(),
+            (out["low"] - prev_close).abs(),
+        ],
+        axis=1,
+    ).max(axis=1)
+    out["atr_14"] = tr.rolling(14).mean()
+    out["vol_sma50"] = out["volume"].rolling(50).mean()
+    out["bb_mid"] = out["close"].rolling(20).mean()
+    bb_std = out["close"].rolling(20).std()
+    out["bb_up"] = out["bb_mid"] + 2.0 * bb_std
+    out["bb_low"] = out["bb_mid"] - 2.0 * bb_std
+    out["rsi_14"] = _compute_rsi(out["close"], 14)
+    return out
 
 
 def _get_funding_rate(client, symbol: str) -> float:
@@ -970,40 +1119,47 @@ def _build_status_message(client) -> str:
     open_syms = sorted(_get_exchange_open_symbols(client))
     pos_details = _get_position_details(client)
     risk_state = _load_risk_state()
+    btc_regime = get_btc_regime(client)
     locked = bool(risk_state.get("circuit_permanent_lock", False)) or bool(risk_state.get("circuit_active", False))
     risk_text = "Locked" if locked else "Normal"
     now_str = datetime.now(TZ_TAIWAN).strftime("%Y-%m-%d %H:%M:%S")
-    notional = equity * NOTIONAL_PCT_OF_EQUITY
+    effective_notional_pct = _get_effective_notional_pct(risk_state)
+    notional = equity * effective_notional_pct
+    c_last_scan = str(risk_state.get("c_last_scan_hour_utc", "N/A"))
     return (
         "🛰️ <b>[系統狀態看板]</b>\n"
+        f"🧠 策略版本: {STRATEGY_VERSION}\n"
+        f"🌐 BTC Regime: {btc_regime}\n"
+        f"🧩 引擎狀態: A(1D)=ON | C(1H)=ON | TEST_MODE={'ON' if TEST_MODE else 'OFF'}\n"
         f"💰 當前淨值: {equity:.2f} USDT\n"
         f"📌 當前持倉: {open_syms if open_syms else ['None']}\n"
         f"📋 持倉詳情: {pos_details if pos_details else ['None']}\n"
         f"🎯 Monitor count: {len(MONITOR_SYMBOLS)}\n"
-        f"💸 單筆下單金額(Notional): {notional:.2f} USDT\n"
+        f"💸 單筆下單金額(Notional): {notional:.2f} USDT ({effective_notional_pct*100:.0f}% Equity)\n"
         f"🛡️ 風控狀態: {risk_text}\n"
+        f"⏱️ C 最近掃描: {c_last_scan}\n"
         f"🕒 更新時間: {now_str} (UTC+8)\n"
         "🔄 資料來源: Binance 即時查詢\n"
         f"🧮 下一次對帳時間: {_next_reconciliation_time_tw()} (UTC+8)\n"
-        "💡 輸入 /scan 查看 50 檔幣種的進場預警與診斷。"
+        "💡 輸入 /scan 查看 C Group 20 檔幣種的進場預警與診斷。"
     )
 
 
 def _build_help_message() -> str:
     return (
-        "🤖 <b>1D Macro Bot 控制中心 (v1.0)</b>\n"
+        f"🤖 <b>1D Macro Bot 控制中心 ({STRATEGY_VERSION})</b>\n"
         "-------------------------\n"
         "📈 <b>狀態監控</b>\n"
         "/status - 查看淨值、持倉、風控狀態\n"
         "/sync_now - 強制執行帳實對帳\n\n"
         "🔍 <b>市場掃描</b>\n"
-        "/scan - 查看 50 檔進場預警與未達標原因\n\n"
+        "/scan - 查看 C Group 20 檔進場預警與未達標原因\n\n"
         "🛡️ <b>安全控制</b>\n"
         "/close_all - 緊急清倉並永久鎖定 (核按鈕)\n"
         "/unlock_trading - 解除熔斷與永久鎖定\n\n"
         "📜 <b>目前參數</b>\n"
-        "策略: 1D Donchian (N=55)\n"
-        "風控: 50% Notional / 2 倉位\n"
+        "策略: 1D Donchian (N=80, EMA=200, Trail=2.5)\n"
+        "風控: 40% Notional / 2 倉位（回撤>=12%降至30%）\n"
         "權限: 已鎖定白名單管理員"
     )
 
@@ -1114,7 +1270,7 @@ def _build_scan_message(client) -> str:
     diag_lines = diag_lines[:28]
 
     return (
-        "🔍 <b>全市場監控報告 (50 Symbols)</b>\n"
+        "🔍 <b>C Group 監控報告 (20 Symbols)</b>\n"
         f"🕒 掃描時間: {now_str} (UTC+8)\n"
         f"💰 當前資產: {equity:.2f} USDT\n\n"
         "🔥 <b>接近突破 (距離 < 3%)</b>\n"
@@ -1137,6 +1293,8 @@ def _handle_scan_command(notifier, bot_token: str, chat_id: str) -> None:
         ema_slow = int(params.get("ema_slow_period", 100))
         total = len(MONITOR_SYMBOLS)
         equity = _get_total_equity_usdt(cmd_client)
+        btc_regime = get_btc_regime(cmd_client)
+        blocked_side = "SELL" if btc_regime == "bull" else ("BUY" if btc_regime == "bear" else "NONE")
 
         progress_id = _tg_send_plain(bot_token, chat_id, f"⏳ 掃描中: 0/{total} ...")
         reason_store: dict[str, str] = {}
@@ -1183,6 +1341,14 @@ def _handle_scan_command(notifier, bot_token: str, chat_id: str) -> None:
 
                 signal, _ = get_signal_from_row(merged, params, last_regime=None)
                 if signal and signal.should_enter:
+                    if blocked_side != "NONE" and signal.side == blocked_side:
+                        if btc_regime == "bull":
+                            reason = "[DualGate屏蔽] 大盤看多，空頭訊號已屏蔽"
+                        else:
+                            reason = "[DualGate屏蔽] 大盤看空，多頭訊號已屏蔽"
+                        reason_store[symbol] = reason
+                        batch_lines.append(f"{symbol}: {reason}")
+                        continue
                     funding_rate = _get_funding_rate(cmd_client, symbol)
                     spread_pct = _get_spread_pct(cmd_client, symbol)
                     annual_funding = max(funding_rate, 0.0) * 3.0 * 365.0
@@ -1238,8 +1404,11 @@ def _handle_scan_command(notifier, bot_token: str, chat_id: str) -> None:
         diag_lines = [f"{sym}: {reason_store[sym]}" for sym in MONITOR_SYMBOLS if sym in reason_store][:28]
         now_str = datetime.now(TZ_TAIWAN).strftime("%Y-%m-%d %H:%M:%S")
         summary = (
-            "🔍 50 幣種宏觀預警報告\n"
+            "🔍 C Group(20) 宏觀預警報告\n"
             f"🕒 掃描時間: {now_str} (UTC+8)\n"
+            f"🌐 BTC Regime: {btc_regime}\n"
+            f"🧠 引擎: A(1D breakout) + C(1H sniper)\n"
+            f"🚦 方向限制: {'大盤看多，僅允許 LONG' if btc_regime == 'bull' else ('大盤看空，僅允許 SHORT' if btc_regime == 'bear' else 'Regime 未知，暫不屏蔽')}\n"
             f"💰 當前資產: {equity:.2f} USDT\n\n"
             "🔥 接近突破 (距離 < 3%)\n"
             f"{chr(10).join(hot_lines) if hot_lines else 'None'}\n\n"
@@ -1255,7 +1424,7 @@ def _handle_scan_command(notifier, bot_token: str, chat_id: str) -> None:
 
 def _refresh_monitor_symbols(client) -> None:
     global MONITOR_SYMBOLS, PRIMARY_SYMBOL
-    MONITOR_SYMBOLS = _select_top_monitor_symbols(client, limit=50)
+    MONITOR_SYMBOLS = list(C_GROUP_SYMBOLS)
     if MONITOR_SYMBOLS:
         PRIMARY_SYMBOL = MONITOR_SYMBOLS[0]
 
@@ -1380,7 +1549,8 @@ def _telegram_command_loop():
                     equity = _get_total_equity_usdt(cmd_client)
                     now_str = datetime.now(TZ_TAIWAN).strftime("%Y-%m-%d %H:%M:%S")
                     pos_details = _get_position_details(cmd_client)
-                    notional = equity * NOTIONAL_PCT_OF_EQUITY
+                    effective_notional_pct = _get_effective_notional_pct(state)
+                    notional = equity * effective_notional_pct
                     state["expected_open_symbols"] = ex
                     _save_risk_state(state)
                     notifier.send_message(
@@ -1388,7 +1558,7 @@ def _telegram_command_loop():
                         f"交易所持倉已同步: {ex if ex else ['None']}\n"
                         f"💰 Equity: {equity:.2f} USDT\n"
                         f"📋 持倉詳情: {pos_details if pos_details else ['None']}\n"
-                        f"💸 Notional: {notional:.2f} USDT\n"
+                        f"💸 Notional: {notional:.2f} USDT ({effective_notional_pct*100:.0f}% Equity)\n"
                         f"🕒 更新時間: {now_str} (UTC+8)"
                     )
                 elif text == "/help":
@@ -1411,6 +1581,7 @@ def run_once(client, telegram_notifier=None, last_summary_date: str = "", last_s
     risk_state = _load_risk_state()
     equity = _get_total_equity_usdt(client)
     risk_state = _refresh_circuit_state(risk_state, equity, now_utc)
+    effective_notional_pct = _get_effective_notional_pct(risk_state)
     _save_risk_state(risk_state)
     # 伺服器時間同步檢查（>1s 警告）
     drift_ms = _check_server_time_drift_ms(client)
@@ -1429,6 +1600,8 @@ def run_once(client, telegram_notifier=None, last_summary_date: str = "", last_s
 
     if in_decision_window and last_scan_date != today_utc:
         _refresh_monitor_symbols(client)
+        btc_regime = get_btc_regime(client)
+        blocked_side = "SELL" if btc_regime == "bull" else ("BUY" if btc_regime == "bear" else "NONE")
         # 每日對帳：本地預期持倉 vs 交易所真實持倉
         exchange_open = _get_exchange_open_symbols(client)
         local_open = set(regime_map.get("_open_symbols", []))
@@ -1453,6 +1626,12 @@ def run_once(client, telegram_notifier=None, last_summary_date: str = "", last_s
             signal, current_regime = get_signal_from_row(merged, params, last_regime=last_regime)
             regime_map[symbol] = current_regime
             if signal and signal.should_enter:
+                if blocked_side != "NONE" and signal.side == blocked_side:
+                    if btc_regime == "bull":
+                        audit_lines.append(f"{symbol}: DualGate 屏蔽空頭（BTC Bull）")
+                    else:
+                        audit_lines.append(f"{symbol}: DualGate 屏蔽多頭（BTC Bear）")
+                    continue
                 roc_30 = float(merged.get("roc_30", 0.0) or 0.0)
                 funding_rate = _get_funding_rate(client, symbol)
                 spread_pct = _get_spread_pct(client, symbol)
@@ -1503,7 +1682,8 @@ def run_once(client, telegram_notifier=None, last_summary_date: str = "", last_s
             elif ranked_shorts:
                 selected_candidates = ranked_shorts[:available_slots]
         print(
-            f"[Macro Scan] 掃描日期: {today_utc} | 候選訊號: {candidate_symbols or ['None']} | "
+            f"[Macro Scan] 掃描日期: {today_utc} | BTC Regime: {btc_regime} | "
+            f"候選訊號: {candidate_symbols or ['None']} | "
             f"RS 仲裁選擇: {[c['symbol'] for c in selected_candidates] if selected_candidates else ['None']}"
         )
 
@@ -1538,7 +1718,14 @@ def run_once(client, telegram_notifier=None, last_summary_date: str = "", last_s
                         signal = selected["signal"]
                         row = selected["row"]
                         symbol = selected["symbol"]
-                        qty = _compute_qty_by_notional(equity, signal.entry_price, NOTIONAL_PCT_OF_EQUITY)
+                        notional_pct_a = _get_effective_strategy_notional_pct(
+                            risk_state,
+                            STRAT_A_BASE_NOTIONAL_PCT,
+                            signal_mult=1.0,
+                        )
+                        qty = _compute_qty_by_notional(equity, signal.entry_price, notional_pct_a)
+                        if TEST_MODE:
+                            qty = _compute_qty_test_mode(signal.entry_price)
                         if qty <= 0:
                             audit_lines.append(f"{symbol}: 淨值不足 qty=0")
                             continue
@@ -1582,7 +1769,7 @@ def run_once(client, telegram_notifier=None, last_summary_date: str = "", last_s
                                 f"📊 <b>Macro 1D: {symbol} {signal.side}</b>\n"
                                 f"開倉模式: {margin_mode} | Entry: {signal.entry_price} | SL: {sl_price} | qty: {qty}\n"
                                 f"ROC30: {selected['roc_30']:+.2%} | Funding: {selected['funding_rate']*100:.3f}%/8h | "
-                                f"Spread: {selected['spread_pct']:.3f}%"
+                                f"Spread: {selected['spread_pct']:.3f}% | A-Notional: {notional_pct_a*100:.0f}%"
                             )
                     if filled_symbols:
                         decision_text = f"進場 {filled_symbols}"
@@ -1632,6 +1819,115 @@ def run_once(client, telegram_notifier=None, last_summary_date: str = "", last_s
         _save_risk_state(risk_state)
 
         last_scan_date = today_utc
+
+    # STRAT_C 1H 引擎：每小時只掃一次（同一 event loop 內）
+    now_hour_key = now_utc.strftime("%Y-%m-%d %H")
+    last_c_hour = str(risk_state.get("c_last_scan_hour_utc", ""))
+    if now_hour_key != last_c_hour:
+        btc_regime = get_btc_regime(client)
+        blocked_side = "SELL" if btc_regime == "bull" else ("BUY" if btc_regime == "bear" else "NONE")
+        open_count = _count_open_positions(client)
+        if not risk_state.get("circuit_active", False) and open_count < MAX_CONCURRENT:
+            for symbol in MONITOR_SYMBOLS:
+                if _count_open_positions(client) >= MAX_CONCURRENT:
+                    break
+                if has_open_position(client, symbol):
+                    continue
+                funding_rate = _get_funding_rate(client, symbol)
+                h1 = _fetch_1h_with_indicators(client, symbol, limit=320)
+                sig = _calc_c_signal_from_1h(h1, symbol, funding_rate)
+                if not sig:
+                    continue
+                if blocked_side != "NONE" and sig["side"] == blocked_side:
+                    continue
+                signal_mult = float(sig.get("score", 1.0) or 1.0)
+                # score -> 0.5x~1.8x
+                if signal_mult >= 8:
+                    signal_mult = 1.8
+                elif signal_mult >= 5:
+                    signal_mult = 1.6
+                elif signal_mult >= 3:
+                    signal_mult = 1.2
+                else:
+                    signal_mult = 0.5
+                notional_pct_c = _get_effective_strategy_notional_pct(
+                    risk_state,
+                    STRAT_C_BASE_NOTIONAL_PCT,
+                    signal_mult=signal_mult,
+                )
+                qty = _compute_qty_by_notional(equity, float(sig["entry_price"]), notional_pct_c)
+                if TEST_MODE:
+                    qty = _compute_qty_test_mode(float(sig["entry_price"]))
+                if qty <= 0:
+                    continue
+                order = place_market_order(client, symbol, str(sig["side"]), qty)
+                if not order:
+                    continue
+                stop_order = place_stop_market_close(client, symbol, str(sig["side"]), float(sig["sl_price"]))
+                stop_order_id = stop_order.get("orderId") if stop_order else None
+                c_meta = risk_state.get("c_open_meta", {})
+                if not isinstance(c_meta, dict):
+                    c_meta = {}
+                c_meta[symbol] = {
+                    "entry_time_utc": datetime.now(timezone.utc).isoformat(),
+                    "entry_price": float(sig["entry_price"]),
+                    "side": str(sig["side"]),
+                    "strategy": "C",
+                }
+                risk_state["c_open_meta"] = c_meta
+                _save_risk_state(risk_state)
+                if telegram_notifier and getattr(telegram_notifier, "send_message", None):
+                    telegram_notifier.send_message(
+                        f"🎯 <b>STRAT_C 進場</b>\n"
+                        f"{symbol} {sig['side']} qty={qty}\n"
+                        f"Entry={float(sig['entry_price']):.4f} | SL={float(sig['sl_price']):.4f}\n"
+                        f"Funding={funding_rate*100:.3f}%/8h | C-Notional={notional_pct_c*100:.0f}%\n"
+                        f"TEST_MODE={'ON' if TEST_MODE else 'OFF'}"
+                    )
+
+        # C 微停損：持倉 3 小時仍未脫離成本區，強制平倉
+        c_meta = risk_state.get("c_open_meta", {})
+        if isinstance(c_meta, dict):
+            for symbol, meta in list(c_meta.items()):
+                entry_ts = _parse_iso_utc(str(meta.get("entry_time_utc", "")))
+                if not entry_ts:
+                    c_meta.pop(symbol, None)
+                    continue
+                hold_hours = (now_utc - entry_ts).total_seconds() / 3600.0
+                if hold_hours < C_MICRO_STOP_HOURS:
+                    continue
+                pos = get_position_info(client, symbol)
+                if not pos:
+                    c_meta.pop(symbol, None)
+                    continue
+                upnl = float(pos.get("unrealizedProfit", 0) or 0)
+                if upnl > 0:
+                    continue
+                side = "SELL" if float(pos.get("positionAmt", 0) or 0) > 0 else "BUY"
+                qty = round(abs(float(pos.get("positionAmt", 0) or 0)), 6)
+                if qty <= 0:
+                    c_meta.pop(symbol, None)
+                    continue
+                try:
+                    client.place_order(
+                        {
+                            "symbol": symbol,
+                            "side": side,
+                            "type": "MARKET",
+                            "quantity": qty,
+                            "reduceOnly": "true",
+                        }
+                    )
+                    c_meta.pop(symbol, None)
+                    if telegram_notifier and getattr(telegram_notifier, "send_message", None):
+                        telegram_notifier.send_message(
+                            f"🛑 <b>STRAT_C 微停損</b>\n{symbol} 持倉超過 {C_MICRO_STOP_HOURS}h 且未獲利，已平倉。"
+                        )
+                except Exception:
+                    pass
+        risk_state["c_open_meta"] = c_meta
+        risk_state["c_last_scan_hour_utc"] = now_hour_key
+        _save_risk_state(risk_state)
 
     # 保留原每日總結，避免中斷既有監控習慣
     last_summary_date = _send_daily_summary(client, telegram_notifier, last_summary_date)

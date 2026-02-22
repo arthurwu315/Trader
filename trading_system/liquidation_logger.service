@@ -1,0 +1,17 @@
+[Unit]
+Description=Binance Liquidation WebSocket Logger
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=trader
+Group=trader
+WorkingDirectory=/home/trader/trading_system
+ExecStart=/usr/bin/python3 /home/trader/trading_system/research/ws_liquidation_logger.py --db /home/trader/trading_system/research/data/liq_7d.db
+Restart=always
+RestartSec=5
+Environment=PYTHONUNBUFFERED=1
+
+[Install]
+WantedBy=multi-user.target
