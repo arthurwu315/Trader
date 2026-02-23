@@ -22,13 +22,13 @@ class TelegramNotifier:
         else:
             logger.info("⚠️ Telegram 通知未啟用")
     
-    def send_message(self, message: str, parse_mode: str = "HTML") -> bool:
+    def send_message(self, message: str, parse_mode: Optional[str] = None) -> bool:
         """
         發送訊息到 Telegram
         
         Args:
-            message: 訊息內容 (支援 HTML 格式)
-            parse_mode: 解析模式 (HTML 或 Markdown)
+            message: 訊息內容
+            parse_mode: 解析模式（None/Markdown/HTML）；預設 None 走純文字
         
         Returns:
             是否發送成功
@@ -42,9 +42,10 @@ class TelegramNotifier:
             payload = {
                 "chat_id": self.chat_id,
                 "text": message,
-                "parse_mode": parse_mode,
                 "disable_web_page_preview": True,
             }
+            if parse_mode:
+                payload["parse_mode"] = parse_mode
             
             response = requests.post(url, json=payload, timeout=10)
             
@@ -229,7 +230,7 @@ if __name__ == "__main__":
     
     if notifier.enabled:
         print("發送測試訊息...")
-        notifier.send_message("🧪 <b>測試訊息</b>\n\nTelegram 通知功能正常! ✅")
+        notifier.send_message("🧪 測試訊息\n\nTelegram 通知功能正常! ✅")
     else:
         print("❌ Telegram 未啟用")
         print("請在 .env 中設定:")
