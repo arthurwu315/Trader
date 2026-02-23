@@ -10,8 +10,8 @@ WorkingDirectory=/home/trader/trading_system
 ExecStart=/usr/bin/python3 -u -m bots.bot_c.futures_run
 Restart=always
 RestartSec=30
-StandardOutput=append:/home/trader/trading_system/logs/paper_out.log
-StandardError=append:/home/trader/trading_system/logs/paper_err.log
+StandardOutput=journal
+StandardError=journal
 
 # 避免記憶體不足時頻繁重啟
 Environment=PYTHONUNBUFFERED=1

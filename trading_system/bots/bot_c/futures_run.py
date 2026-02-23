@@ -18,6 +18,9 @@ from pathlib import Path
 
 import requests
 
+# 即時輸出日誌到 journald（避免 stdout 緩衝延遲）
+os.environ.setdefault("PYTHONUNBUFFERED", "1")
+
 # 台灣時區 (UTC+8)：print / Telegram 顯示用此；paper_signals.json、heartbeat 寫入維持 UTC
 TZ_TAIWAN = timezone(timedelta(hours=8))
 
@@ -107,6 +110,7 @@ if ADMIN_CHAT_ID_ENV:
 # 每日總結觸發小時（目前=7 為測試用，驗證通知後請改回 8）
 SUMMARY_TRIGGER_HOUR = 8
 C_MICRO_STOP_HOURS = 3
+C_SCAN_STALE_EXIT_SECONDS = int(1.5 * 3600)
 
 
 def get_client():
@@ -1570,7 +1574,13 @@ def _telegram_command_loop():
         print(f"  [WARN] Telegram 指令循環異常: {e}")
 
 
-def run_once(client, telegram_notifier=None, last_summary_date: str = "", last_scan_date: str = ""):
+def run_once(
+    client,
+    telegram_notifier=None,
+    last_summary_date: str = "",
+    last_scan_date: str = "",
+    force_startup_scan: bool = False,
+):
     from bots.bot_c.deploy_ready import get_signal_from_row, get_deploy_params, HARD_STOP_POSITION_PCT
 
     now_utc = datetime.now(timezone.utc)
@@ -1598,7 +1608,8 @@ def run_once(client, telegram_notifier=None, last_summary_date: str = "", last_s
     health_lines: list[str] = []
     decision_text = "續抱"
 
-    if in_decision_window and last_scan_date != today_utc:
+    a_scan_due = (in_decision_window and last_scan_date != today_utc) or force_startup_scan
+    if a_scan_due:
         _refresh_monitor_symbols(client)
         btc_regime = get_btc_regime(client)
         blocked_side = "SELL" if btc_regime == "bull" else ("BUY" if btc_regime == "bear" else "NONE")
@@ -1823,7 +1834,12 @@ def run_once(client, telegram_notifier=None, last_summary_date: str = "", last_s
     # STRAT_C 1H 引擎：每小時只掃一次（同一 event loop 內）
     now_hour_key = now_utc.strftime("%Y-%m-%d %H")
     last_c_hour = str(risk_state.get("c_last_scan_hour_utc", ""))
-    if now_hour_key != last_c_hour:
+    c_scan_due = force_startup_scan or (now_hour_key != last_c_hour)
+    if c_scan_due:
+        # 掃描一開始就寫入，避免中途出錯時看不到「曾嘗試掃描」的痕跡
+        risk_state["c_last_scan_hour_utc"] = f"{now_hour_key} (start)"
+        risk_state["c_last_scan_ts_utc"] = now_utc.isoformat()
+        _save_risk_state(risk_state)
         btc_regime = get_btc_regime(client)
         blocked_side = "SELL" if btc_regime == "bull" else ("BUY" if btc_regime == "bear" else "NONE")
         open_count = _count_open_positions(client)
@@ -1927,7 +1943,20 @@ def run_once(client, telegram_notifier=None, last_summary_date: str = "", last_s
                     pass
         risk_state["c_open_meta"] = c_meta
         risk_state["c_last_scan_hour_utc"] = now_hour_key
+        risk_state["c_last_scan_ts_utc"] = now_utc.isoformat()
         _save_risk_state(risk_state)
+
+    # 自我電擊：C 掃描停滯超過 1.5 小時，主動退出讓 systemd 拉起
+    c_last_scan_ts = _parse_iso_utc(str(risk_state.get("c_last_scan_ts_utc", "")))
+    if c_last_scan_ts is not None:
+        stale_sec = (now_utc - c_last_scan_ts).total_seconds()
+        if stale_sec > C_SCAN_STALE_EXIT_SECONDS:
+            msg = (
+                f"[FATAL] C scan stale {int(stale_sec)}s > "
+                f"{C_SCAN_STALE_EXIT_SECONDS}s, exiting for systemd restart"
+            )
+            print(msg)
+            raise SystemExit(1)
 
     # 保留原每日總結，避免中斷既有監控習慣
     last_summary_date = _send_daily_summary(client, telegram_notifier, last_summary_date)
@@ -1984,15 +2013,22 @@ def main():
     consecutive_fail = 0
     last_summary_date = ""
     last_scan_date = ""
+    first_loop = True
     while True:
         try:
             consecutive_fail, last_summary_date, last_scan_date = run_once(
-                client, telegram_notifier, last_summary_date, last_scan_date
+                client,
+                telegram_notifier,
+                last_summary_date,
+                last_scan_date,
+                force_startup_scan=first_loop,
             )
+            first_loop = False
             if consecutive_fail >= CONSECUTIVE_FAIL_THRESHOLD:
                 send_disconnect_alert()
                 consecutive_fail = 0
         except Exception as e:
+            first_loop = False
             consecutive_fail += 1
             sys.stderr.write(f"[futures_run] 本輪失敗: {e}\n")
             if consecutive_fail >= CONSECUTIVE_FAIL_THRESHOLD:
