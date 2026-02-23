@@ -63,9 +63,9 @@ class TelegramNotifier:
     def notify_startup(self, config) -> None:
         """機器人啟動通知"""
         message = f"""
-🚀 <b>交易機器人已啟動</b>
+🚀 交易機器人已啟動
 
-📊 <b>配置資訊:</b>
+📊 配置資訊:
 • 標的: {config.symbol}
 • 槓桿: {config.leverage}x
 • 保證金: {config.margin_type}
@@ -73,7 +73,7 @@ class TelegramNotifier:
 
 ⏰ 時間: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
 
-🛡️ <b>風險設定:</b>
+🛡️ 風險設定:
 • 單筆風險: {config.risk_per_trade_pct:.1%}
 • 總風險上限: {config.max_total_loss_pct:.1%}
 • 單日虧損限制: {config.max_daily_loss_pct:.1%}
@@ -84,16 +84,16 @@ class TelegramNotifier:
                      stop_loss: float, take_profit_1: float, take_profit_2: float) -> None:
         """進場通知"""
         message = f"""
-📈 <b>開倉通知</b>
+📈 開倉通知
 
-🎯 <b>{symbol}</b> - {side}
+🎯 {symbol} - {side}
 
-💰 <b>進場資訊:</b>
+💰 進場資訊:
 • 數量: {quantity}
 • 價格: ${price:,.2f}
 • 名義價值: ${quantity * price:,.2f}
 
-🛡️ <b>風控設定:</b>
+🛡️ 風控設定:
 • 止損: ${stop_loss:,.2f} ({((price - stop_loss) / price * 100):.2f}%)
 • 止盈1: ${take_profit_1:,.2f} ({((take_profit_1 - price) / price * 100):.2f}%)
 • 止盈2: ${take_profit_2:,.2f} ({((take_profit_2 - price) / price * 100):.2f}%)
@@ -109,16 +109,16 @@ class TelegramNotifier:
         color = "盈利" if pnl > 0 else "虧損"
         
         message = f"""
-{emoji} <b>平倉通知 - {color}</b>
+{emoji} 平倉通知 - {color}
 
-🎯 <b>{symbol}</b> - {side}
+🎯 {symbol} - {side}
 
-💰 <b>交易資訊:</b>
+💰 交易資訊:
 • 數量: {quantity}
 • 進場: ${entry_price:,.2f}
 • 出場: ${exit_price:,.2f}
 
-📊 <b>損益:</b>
+📊 損益:
 • 金額: ${pnl:,.2f}
 • 百分比: {pnl_pct:,.2f}%
 
@@ -129,7 +129,7 @@ class TelegramNotifier:
     def notify_strategy_signal(self, signal_reason: str, details: dict = None) -> None:
         """策略訊號通知"""
         message = f"""
-💡 <b>策略訊號更新</b>
+💡 策略訊號更新
 
 {signal_reason}
 
@@ -140,11 +140,11 @@ class TelegramNotifier:
     def notify_risk_warning(self, warning_type: str, details: str) -> None:
         """風險警告通知"""
         message = f"""
-⚠️ <b>風險警告</b>
+⚠️ 風險警告
 
-<b>類型:</b> {warning_type}
+類型: {warning_type}
 
-<b>詳情:</b>
+詳情:
 {details}
 
 ⏰ {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
@@ -154,11 +154,11 @@ class TelegramNotifier:
     def notify_critical_error(self, error_type: str, error_message: str) -> None:
         """嚴重錯誤通知"""
         message = f"""
-🚨 <b>嚴重錯誤</b>
+🚨 嚴重錯誤
 
-<b>類型:</b> {error_type}
+類型: {error_type}
 
-<b>錯誤訊息:</b>
+錯誤訊息:
 {error_message}
 
 ⚠️ 請立即檢查機器人狀態!
@@ -171,18 +171,18 @@ class TelegramNotifier:
                                  loss_pct: float, limit_pct: float) -> None:
         """總風險上限觸發通知"""
         message = f"""
-🚨🚨🚨 <b>總風險上限觸發</b> 🚨🚨🚨
+🚨🚨🚨 總風險上限觸發 🚨🚨🚨
 
-⛔ <b>機器人已停止交易!</b>
+⛔ 機器人已停止交易!
 
-📊 <b>帳戶狀態:</b>
+📊 帳戶狀態:
 • 初始權益: ${initial_equity:,.2f}
 • 當前權益: ${current_equity:,.2f}
 • 虧損金額: ${initial_equity - current_equity:,.2f}
 • 虧損百分比: {loss_pct:.2%}
 • 設定上限: {limit_pct:.2%}
 
-⚠️ <b>請立即:</b>
+⚠️ 請立即:
 1. 檢查所有倉位
 2. 分析虧損原因
 3. 決定是否繼續運行
@@ -198,14 +198,14 @@ class TelegramNotifier:
         win_rate = (win_count / trades_count * 100) if trades_count > 0 else 0
         
         message = f"""
-📊 <b>每日交易總結</b>
+📊 每日交易總結
 
-📈 <b>交易統計:</b>
+📈 交易統計:
 • 交易次數: {trades_count}
 • 獲利次數: {win_count}
 • 勝率: {win_rate:.1f}%
 
-💰 <b>損益:</b>
+💰 損益:
 • 今日損益: ${total_pnl:,.2f}
 • 當前權益: ${current_equity:,.2f}
 

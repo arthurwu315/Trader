@@ -151,7 +151,7 @@ def _send_daily_summary(notifier, last_sent_date: str) -> str:
     longs = sum(1 for s in records if (s.get("side") or "").upper() == "BUY")
     shorts = sum(1 for s in records if (s.get("side") or "").upper() == "SELL")
     msg = (
-        f"📊 <b>昨日戰報摘要</b> ({yesterday})\n"
+        f"📊 昨日戰報摘要 ({yesterday})\n"
         f"昨日訊號筆數: {len(yesterday_signals)}\n"
         f"累計進場總筆數: {total} (多: {longs} / 空: {shorts})\n"
         f"⏰ {now_local.strftime('%Y-%m-%d %H:%M')}"
@@ -186,7 +186,7 @@ def run_once(client, consecutive_fail: int, telegram_notifier=None, last_summary
         print(f"  [訊號] {record['side']} @ {record['entry_price']}  sl={record['sl_price']}  tp={record['tp_price']}")
         if telegram_notifier and getattr(telegram_notifier, "send_message", None):
             tg_msg = (
-                f"📊 <b>Signal: {record['side']}</b>\n"
+                f"📊 Signal: {record['side']}\n"
                 f"Entry: {record['entry_price']} | SL: {record['sl_price']} | TP: {record['tp_price']}\n"
                 f"Bar: {bar_time}"
             )

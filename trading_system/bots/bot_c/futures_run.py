@@ -825,17 +825,17 @@ def _send_daily_summary(client, notifier, last_sent_date: str) -> str:
     count = len(yesterday_signals)
 
     msg = (
-        "📊 <b>【Strategy C】每日實戰總結</b>\n"
+        "📊 【Strategy C】每日實戰總結\n"
         f"📅 日期：{yesterday}\n"
         "-------------------------\n"
-        "💰 <b>帳戶狀態</b>\n"
+        "💰 帳戶狀態\n"
         f"總餘額：{balance:.2f} USDT\n"
         f"昨日盈虧：{daily_pnl:+.2f} USDT ({pnl_pct:+.2f}%)\n"
         f"昨日手續費：{daily_fees:.2f} USDT\n"
-        "📈 <b>交易統計</b>\n"
+        "📈 交易統計\n"
         f"昨日訊號：{count} 筆\n"
         f"累計總筆數：{total_count} (多:{longs} / 空:{shorts})\n"
-        "🛡️ <b>當前持倉</b>\n"
+        "🛡️ 當前持倉\n"
         f"{current_position_info}\n"
         f"⏰ 報時：{current_time}"
     )
@@ -930,7 +930,7 @@ def _send_macro_control_report(
         return
     warn_txt = "；".join(warnings) if warnings else "無"
     msg = (
-        "📊 <b>[1D Macro 實盤報告]</b>\n"
+        "📊 [1D Macro 實盤報告]\n"
         f"📅 日期: {report_date}\n"
         f"💰 當前淨值: {equity:.2f} USDT ({equity_change_pct:+.2f}%)\n"
         f"🎯 RS 候選名單: {', '.join(top3) if top3 else 'None'}\n"
@@ -1131,7 +1131,7 @@ def _build_status_message(client) -> str:
     notional = equity * effective_notional_pct
     c_last_scan = str(risk_state.get("c_last_scan_hour_utc", "N/A"))
     return (
-        "🛰️ <b>[系統狀態看板]</b>\n"
+        "🛰️ [系統狀態看板]\n"
         f"🧠 策略版本: {STRATEGY_VERSION}\n"
         f"🌐 BTC Regime: {btc_regime}\n"
         f"🧩 引擎狀態: A(1D)=ON | C(1H)=ON | TEST_MODE={'ON' if TEST_MODE else 'OFF'}\n"
@@ -1151,17 +1151,17 @@ def _build_status_message(client) -> str:
 
 def _build_help_message() -> str:
     return (
-        f"🤖 <b>1D Macro Bot 控制中心 ({STRATEGY_VERSION})</b>\n"
+        f"🤖 1D Macro Bot 控制中心 ({STRATEGY_VERSION})\n"
         "-------------------------\n"
-        "📈 <b>狀態監控</b>\n"
+        "📈 狀態監控\n"
         "/status - 查看淨值、持倉、風控狀態\n"
         "/sync_now - 強制執行帳實對帳\n\n"
-        "🔍 <b>市場掃描</b>\n"
+        "🔍 市場掃描\n"
         "/scan - 查看 C Group 20 檔進場預警與未達標原因\n\n"
-        "🛡️ <b>安全控制</b>\n"
+        "🛡️ 安全控制\n"
         "/close_all - 緊急清倉並永久鎖定 (核按鈕)\n"
         "/unlock_trading - 解除熔斷與永久鎖定\n\n"
-        "📜 <b>目前參數</b>\n"
+        "📜 目前參數\n"
         "策略: 1D Donchian (N=80, EMA=200, Trail=2.5)\n"
         "風控: 40% Notional / 2 倉位（回撤>=12%降至30%）\n"
         "權限: 已鎖定白名單管理員"
@@ -1274,12 +1274,12 @@ def _build_scan_message(client) -> str:
     diag_lines = diag_lines[:28]
 
     return (
-        "🔍 <b>C Group 監控報告 (20 Symbols)</b>\n"
+        "🔍 C Group 監控報告 (20 Symbols)\n"
         f"🕒 掃描時間: {now_str} (UTC+8)\n"
         f"💰 當前資產: {equity:.2f} USDT\n\n"
-        "🔥 <b>接近突破 (距離 < 3%)</b>\n"
+        "🔥 接近突破 (距離 < 3%)\n"
         f"{chr(10).join(hot_lines) if hot_lines else 'None'}\n\n"
-        "💤 <b>觀察中 / 原因診斷</b>\n"
+        "💤 觀察中 / 原因診斷\n"
         f"{chr(10).join(diag_lines) if diag_lines else 'None'}"
     )
 
@@ -1508,7 +1508,7 @@ def _telegram_command_loop():
                     state.pop("kill_confirm_deadline_utc", None)
                     _save_risk_state(state)
                     notifier.send_message(
-                        "🧨 <b>[核按鈕已執行]</b>\n"
+                        "🧨 [核按鈕已執行]\n"
                         f"已嘗試平倉筆數: {closed_cnt}\n"
                         f"當前帳戶可用餘額: {balance:.2f} USDT\n"
                         "交易已永久鎖定（circuit_permanent_lock=true）。"
@@ -1536,7 +1536,7 @@ def _telegram_command_loop():
                     state.pop("unlock_confirm_deadline_utc", None)
                     _save_risk_state(state)
                     notifier.send_message(
-                        "✅ <b>[系統已恢復]</b>\n"
+                        "✅ [系統已恢復]\n"
                         "交易鎖定已解除，監控中。\n"
                         "下一個決策窗口為 08:05 (UTC+8)。"
                     )
@@ -1558,7 +1558,7 @@ def _telegram_command_loop():
                     state["expected_open_symbols"] = ex
                     _save_risk_state(state)
                     notifier.send_message(
-                        "🔄 <b>[手動對帳完成]</b>\n"
+                        "🔄 [手動對帳完成]\n"
                         f"交易所持倉已同步: {ex if ex else ['None']}\n"
                         f"💰 Equity: {equity:.2f} USDT\n"
                         f"📋 持倉詳情: {pos_details if pos_details else ['None']}\n"
@@ -1599,7 +1599,7 @@ def run_once(
         warning = f"伺服器時間偏移 {drift_ms}ms > 1000ms，請檢查 NTP"
         print(f"  [WARN] {warning}")
         if telegram_notifier and getattr(telegram_notifier, "send_message", None):
-            telegram_notifier.send_message(f"⚠️ <b>[時間同步警告]</b>\n{warning}")
+            telegram_notifier.send_message(f"⚠️ [時間同步警告]\n{warning}")
 
     candidates: list[dict] = []
     candidate_symbols: list[str] = []
@@ -1623,7 +1623,7 @@ def run_once(
             _save_risk_state(risk_state)
             if telegram_notifier and getattr(telegram_notifier, "send_message", None):
                 telegram_notifier.send_message(
-                    "🚨 <b>[同步異常]</b>\n"
+                    "🚨 [同步異常]\n"
                     f"本地持倉: {sorted(local_open)}\n"
                     f"交易所持倉: {sorted(exchange_open)}\n"
                     "已強制校準本地狀態，請檢查！"
@@ -1710,7 +1710,7 @@ def run_once(
                 print("  [RISK] Circuit Breaker 啟動，跳過新進場")
                 if telegram_notifier and getattr(telegram_notifier, "send_message", None):
                     telegram_notifier.send_message(
-                        "🚨 <b>緊急止損警告</b>\n"
+                        "🚨 緊急止損警告\n"
                         f"當月峰值回撤已達 {risk_state.get('latest_drawdown_pct', 0.0):.2f}%\n"
                         f"新倉暫停至: {risk_state.get('circuit_until_utc', 'N/A')}"
                     )
@@ -1777,7 +1777,7 @@ def run_once(
                         if telegram_notifier and getattr(telegram_notifier, "send_message", None):
                             margin_mode = get_margin_type_from_api(client, symbol)
                             telegram_notifier.send_message(
-                                f"📊 <b>Macro 1D: {symbol} {signal.side}</b>\n"
+                                f"📊 Macro 1D: {symbol} {signal.side}\n"
                                 f"開倉模式: {margin_mode} | Entry: {signal.entry_price} | SL: {sl_price} | qty: {qty}\n"
                                 f"ROC30: {selected['roc_30']:+.2%} | Funding: {selected['funding_rate']*100:.3f}%/8h | "
                                 f"Spread: {selected['spread_pct']:.3f}% | A-Notional: {notional_pct_a*100:.0f}%"
@@ -1894,7 +1894,7 @@ def run_once(
                 _save_risk_state(risk_state)
                 if telegram_notifier and getattr(telegram_notifier, "send_message", None):
                     telegram_notifier.send_message(
-                        f"🎯 <b>STRAT_C 進場</b>\n"
+                        f"🎯 STRAT_C 進場\n"
                         f"{symbol} {sig['side']} qty={qty}\n"
                         f"Entry={float(sig['entry_price']):.4f} | SL={float(sig['sl_price']):.4f}\n"
                         f"Funding={funding_rate*100:.3f}%/8h | C-Notional={notional_pct_c*100:.0f}%\n"
@@ -1937,7 +1937,7 @@ def run_once(
                     c_meta.pop(symbol, None)
                     if telegram_notifier and getattr(telegram_notifier, "send_message", None):
                         telegram_notifier.send_message(
-                            f"🛑 <b>STRAT_C 微停損</b>\n{symbol} 持倉超過 {C_MICRO_STOP_HOURS}h 且未獲利，已平倉。"
+                            f"🛑 STRAT_C 微停損\n{symbol} 持倉超過 {C_MICRO_STOP_HOURS}h 且未獲利，已平倉。"
                         )
                 except Exception:
                     pass

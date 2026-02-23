@@ -119,7 +119,7 @@ class StrategyCBot:
         # ✅ Telegram啟動通知 - 欄位名完全對齊!
         if self.config.enable_telegram:
             self.telegram.send_message(
-                f"⚡ <b>Strategy C 高報酬版 啟動</b>\n\n"
+                f"⚡ Strategy C 高報酬版 啟動\n\n"
                 f"版本: {self.config.strategy_version}\n"  # ✅ strategy_version
                 f"商品: {self.config.symbol}\n"
                 f"模式: {self.config.mode}\n"  # ✅ mode
@@ -379,7 +379,7 @@ class StrategyCBot:
                     
                     if self.config.enable_telegram:
                         self.telegram.send_message(
-                            f"🚫 <b>Strategy B Gate拒單</b>\n\n"
+                            f"🚫 Strategy B Gate拒單\n\n"
                             f"原因: {reason}\n"
                             f"型態: {signal.pattern}"
                         )
@@ -395,7 +395,7 @@ class StrategyCBot:
             
             if self.config.enable_telegram:
                 self.telegram.send_message(
-                    f"❌ <b>Strategy B 交易失敗</b>\n\n"
+                    f"❌ Strategy B 交易失敗\n\n"
                     f"錯誤: {str(e)}"
                 )
     
@@ -454,7 +454,7 @@ class StrategyCBot:
                     tp1_net = signal.expected_tp1_pct - total_cost
                     
                     self.telegram.send_message(
-                        f"✅ <b>Strategy B 開倉成功</b>\n\n"
+                        f"✅ Strategy B 開倉成功\n\n"
                         f"型態: {signal.pattern}\n"
                         f"方向: {signal.signal_type}\n"
                         f"進場: ${signal.entry_price:.2f}\n"
@@ -477,7 +477,7 @@ class StrategyCBot:
                 
                 if self.config.enable_telegram:
                     self.telegram.send_message(
-                        f"❌ <b>Strategy B 下單失敗</b>\n\n"
+                        f"❌ Strategy B 下單失敗\n\n"
                         f"錯誤: {result.get('error', 'Unknown')}"
                     )
             
@@ -486,7 +486,7 @@ class StrategyCBot:
             
             if self.config.enable_telegram:
                 self.telegram.send_message(
-                    f"❌ <b>Strategy B 執行異常</b>\n\n"
+                    f"❌ Strategy B 執行異常\n\n"
                     f"錯誤: {str(e)}"
                 )
     
@@ -522,7 +522,7 @@ class StrategyCBot:
         
         if self.config.enable_telegram:
             self.telegram.send_message(
-                f"⚠️ <b>Strategy B V5.3 已停止</b>\n\n"
+                f"⚠️ Strategy B V5.3 已停止\n\n"
                 f"時間: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
             )
         
