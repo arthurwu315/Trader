@@ -578,16 +578,32 @@ def run_strat_c(data_map, funding_filter, funding_map):
                     bbu = mid + 3.0 * std
                     bbl = mid - 3.0 * std
                 if c < bbl and rsi < 10:
-                    return "BUY", 1.0, 0.0, 1.8, float(row.get("roc_20", 0.0) or 0.0)
+                    roc = float(row.get("roc_20", 0.0) or 0.0)
+                    atr = float(row.get("atr_14", 0.0) or 0.0)
+                    atr = max(atr, 1e-6)
+                    risk_adj_score = roc * (1.0 / math.sqrt(atr))
+                    return "BUY", 1.0, 0.0, 1.8, risk_adj_score
                 if c > bbu and rsi > 90:
-                    return "SELL", 1.0, 0.0, 1.8, float(row.get("roc_20", 0.0) or 0.0)
+                    roc = float(row.get("roc_20", 0.0) or 0.0)
+                    atr = float(row.get("atr_14", 0.0) or 0.0)
+                    atr = max(atr, 1e-6)
+                    risk_adj_score = roc * (1.0 / math.sqrt(atr))
+                    return "SELL", 1.0, 0.0, 1.8, risk_adj_score
                 return None, 0, 0, None, 0
 
             # Low-vol symbols: baseline extreme.
             if c < bbl_25 and rsi < 15:
-                return "BUY", 1.0, 0.0, 1.6, float(row.get("roc_20", 0.0) or 0.0)
+                roc = float(row.get("roc_20", 0.0) or 0.0)
+                atr = float(row.get("atr_14", 0.0) or 0.0)
+                atr = max(atr, 1e-6)
+                risk_adj_score = roc * (1.0 / math.sqrt(atr))
+                return "BUY", 1.0, 0.0, 1.6, risk_adj_score
             if c > bbu_25 and rsi > 85:
-                return "SELL", 1.0, 0.0, 1.6, float(row.get("roc_20", 0.0) or 0.0)
+                roc = float(row.get("roc_20", 0.0) or 0.0)
+                atr = float(row.get("atr_14", 0.0) or 0.0)
+                atr = max(atr, 1e-6)
+                risk_adj_score = roc * (1.0 / math.sqrt(atr))
+                return "SELL", 1.0, 0.0, 1.6, risk_adj_score
             return None, 0, 0, None, 0
 
         return _sig
