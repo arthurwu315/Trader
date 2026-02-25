@@ -111,6 +111,7 @@ if ADMIN_CHAT_ID_ENV:
 SUMMARY_TRIGGER_HOUR = 8
 C_MICRO_STOP_HOURS = 3
 C_SCAN_STALE_EXIT_SECONDS = int(1.5 * 3600)
+BINANCE_API_TIMEOUT_SEC = 20
 
 
 def get_client():
@@ -122,6 +123,7 @@ def get_client():
         base_url=base,
         api_key=cfg.binance_api_key or "dummy",
         api_secret=cfg.binance_api_secret or "dummy",
+        timeout=BINANCE_API_TIMEOUT_SEC,
     )
 
 
