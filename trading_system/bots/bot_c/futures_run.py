@@ -1120,6 +1120,20 @@ def _next_reconciliation_time_tw() -> str:
     return target.strftime("%Y-%m-%d %H:%M:%S")
 
 
+def _last_heartbeat_display() -> str:
+    """讀取最後一次主循環 heartbeat 時間（顯示用，台灣時間）。"""
+    try:
+        if not HEARTBEAT_FILE.exists():
+            return "N/A"
+        raw = HEARTBEAT_FILE.read_text(encoding="utf-8").strip()
+        if not raw:
+            return "N/A"
+        dt = _parse_iso_utc(raw)
+        return _format_taiwan(dt) if dt else "N/A"
+    except Exception:
+        return "N/A"
+
+
 def _build_status_message(client) -> str:
     equity = _get_total_equity_usdt(client)
     open_syms = sorted(_get_exchange_open_symbols(client))
@@ -1132,6 +1146,8 @@ def _build_status_message(client) -> str:
     effective_notional_pct = _get_effective_notional_pct(risk_state)
     notional = equity * effective_notional_pct
     c_last_scan = str(risk_state.get("c_last_scan_hour_utc", "N/A"))
+    c_last_note = str(risk_state.get("c_last_check_note", "N/A"))
+    heartbeat_text = _last_heartbeat_display()
     return (
         "🛰️ [系統狀態看板]\n"
         f"🧠 策略版本: {STRATEGY_VERSION}\n"
@@ -1143,7 +1159,8 @@ def _build_status_message(client) -> str:
         f"🎯 Monitor count: {len(MONITOR_SYMBOLS)}\n"
         f"💸 單筆下單金額(Notional): {notional:.2f} USDT ({effective_notional_pct*100:.0f}% Equity)\n"
         f"🛡️ 風控狀態: {risk_text}\n"
-        f"⏱️ C 最近掃描: {c_last_scan}\n"
+        f"⚙️ 系統心跳: {heartbeat_text}\n"
+        f"⏱️ C 最近進場檢測: {c_last_scan} ({c_last_note})\n"
         f"🕒 更新時間: {now_str} (UTC+8)\n"
         "🔄 資料來源: Binance 即時查詢\n"
         f"🧮 下一次對帳時間: {_next_reconciliation_time_tw()} (UTC+8)\n"
@@ -1841,10 +1858,13 @@ def run_once(
         # 掃描一開始就寫入，避免中途出錯時看不到「曾嘗試掃描」的痕跡
         risk_state["c_last_scan_hour_utc"] = f"{now_hour_key} (start)"
         risk_state["c_last_scan_ts_utc"] = now_utc.isoformat()
+        risk_state["c_last_check_note"] = "Scan Started"
         _save_risk_state(risk_state)
         btc_regime = get_btc_regime(client)
+        btc_regime_note = "Bull Regime" if btc_regime == "bull" else ("Bear Regime" if btc_regime == "bear" else "Unknown Regime")
         blocked_side = "SELL" if btc_regime == "bull" else ("BUY" if btc_regime == "bear" else "NONE")
         open_count = _count_open_positions(client)
+        c_entry_count = 0
         if not risk_state.get("circuit_active", False) and open_count < MAX_CONCURRENT:
             for symbol in MONITOR_SYMBOLS:
                 if _count_open_positions(client) >= MAX_CONCURRENT:
@@ -1881,6 +1901,7 @@ def run_once(
                 order = place_market_order(client, symbol, str(sig["side"]), qty)
                 if not order:
                     continue
+                c_entry_count += 1
                 stop_order = place_stop_market_close(client, symbol, str(sig["side"]), float(sig["sl_price"]))
                 stop_order_id = stop_order.get("orderId") if stop_order else None
                 c_meta = risk_state.get("c_open_meta", {})
@@ -1902,6 +1923,14 @@ def run_once(
                         f"Funding={funding_rate*100:.3f}%/8h | C-Notional={notional_pct_c*100:.0f}%\n"
                         f"TEST_MODE={'ON' if TEST_MODE else 'OFF'}"
                     )
+            if c_entry_count > 0:
+                risk_state["c_last_check_note"] = f"{btc_regime_note} - Entry Triggered ({c_entry_count})"
+            else:
+                risk_state["c_last_check_note"] = f"{btc_regime_note} - Skipped"
+        elif risk_state.get("circuit_active", False):
+            risk_state["c_last_check_note"] = f"{btc_regime_note} - Circuit Breaker Active"
+        else:
+            risk_state["c_last_check_note"] = f"{btc_regime_note} - Max Concurrent Reached"
 
         # C 微停損：持倉 3 小時仍未脫離成本區，強制平倉
         c_meta = risk_state.get("c_open_meta", {})
