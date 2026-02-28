@@ -2,9 +2,11 @@
 Alpha Burst B1 - PAPER / MICRO-LIVE entry point.
 Independent of V9. Does NOT modify V9 core.
 Env: ALPHA_BURST_MODE=PAPER|MICRO-LIVE
+     ENABLE_ALPHA_BURST=false (default) => exit without run
 """
 from __future__ import annotations
 
+import logging
 import os
 import sys
 from datetime import datetime, timedelta, timezone
@@ -14,11 +16,18 @@ os.environ.setdefault("SKIP_CONFIG_VALIDATION", "1")
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 
+LOG = logging.getLogger("alpha_burst")
+
 from bots.bot_alpha_burst.config import STRATEGY_ID
 from bots.bot_alpha_burst.ops import check_burst_dd_kill
 
 
 def main():
+    enabled = os.getenv("ENABLE_ALPHA_BURST", "false").strip().lower() in ("1", "true", "yes")
+    if not enabled:
+        LOG.warning("ALPHA_BURST_B1: ENABLE_ALPHA_BURST=false, exit (B1 disabled per postmortem)")
+        print("ALPHA_BURST_B1: ENABLE_ALPHA_BURST=false, exit (B1 disabled per postmortem)")
+        sys.exit(0)
     mode = os.getenv("ALPHA_BURST_MODE", "PAPER").strip().upper()
     mode = "MICRO-LIVE" if mode == "MICRO-LIVE" else "PAPER"
     print(f"Alpha Burst {STRATEGY_ID} {mode} mode")

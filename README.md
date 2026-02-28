@@ -422,6 +422,23 @@ Run: `python3 -m tests.run_v9_walkforward`
 
 ## Alpha Burst B1 (ALPHA_BURST_B1)
 
+**決策（2026-02-28）**: B1 禁止上線。Burst allocation=0%，不得進入 micro-live。
+
+**B1 驗證結果 (2022-2024)**:
+| Metric | Value |
+|--------|-------|
+| E[R] | -0.0486 |
+| WinRate | 38.38% |
+| AvgWin_R / AvgLoss_R | 0.7873 / -0.5694 |
+| Permutation p-value | 0.9160 |
+| Bootstrap 95% CI for E[R] | [-0.1133, 0.0185] |
+
+**硬開關**: `ENABLE_ALPHA_BURST=false`（預設）。若未開啟，burst runner 直接退出並寫 log。Postmortem: `docs/alpha_burst/ALPHA_BURST_B1_POSTMORTEM.md`。解剖報告: `python3 -m tests.run_alpha_burst_b1_diagnose` → `tests/reports/alpha_burst_b1_diagnose.md`。
+
+**下一步候選（結構級）**: B) 改 alpha 類型（compression→expansion 或 regime flip），不沿用 B1 breakout。依據：holding_bars 1–8 桶流血、9+ 桶雖正期望但 permutation 未達顯著。
+
+---
+
 - **Purpose**: Vol-expansion Donchian breakout; burst-style alpha overlay
 - **Universe**: BTCUSDT, ETHUSDT
 - **Trend filter (4H)**: close > EMA200 = long only; close < EMA200 = short only
