@@ -319,8 +319,10 @@ Run: `python3 -m tests.run_v9_walkforward`
 
 ### V9 Telegram Status Dashboard
 
-- Each hourly oneshot run sends a status dashboard to Telegram (STRATEGY_VERSION, GIT_COMMIT, account_equity, HARD_CAP_NOTIONAL, current_notional, effective_leverage, FREEZE_UNTIL, position count, execution time UTC+8).
-- If `TELEGRAM_BOT_TOKEN` or `TELEGRAM_CHAT_ID` is missing, a warning is logged and the runner does not crash.
+- **Freeze principle**: V9 runner does not send Telegram directly (no dotenv/telegram side-effects).
+- **External notifier**: `ops/send_v9_dashboard.py` reads `logs/v9_health_check.txt` and sends the status dashboard.
+- The hourly oneshot runs `ops/run_v9_hourly.sh` (1. v9_live_runner, 2. send_v9_dashboard.py). Step 2 failure does not affect step 1 exit code.
+- **Manual trigger**: `sudo systemctl start trading_bot_v9_oneshot.service` or `python3 ops/send_v9_dashboard.py` (after runner has written health_check).
 - **Test**: `python3 -m tests.test_telegram_health`
 
 ---

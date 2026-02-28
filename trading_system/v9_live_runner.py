@@ -5,19 +5,17 @@ MICRO-LIVE: real orders at 10% notional, log to v9_trade_records.
 
 Strategy: V9_REGIME_CORE (frozen). Execution layer only.
 Env: V9_LIVE_MODE=PAPER|MICRO-LIVE|LIVE
+No Telegram/dotenv side-effects (freeze). Notifications via ops/send_v9_dashboard.py.
 """
 from __future__ import annotations
 
-import logging
 import os
 import sys
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timezone
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(ROOT))
-
-_LOG = logging.getLogger("v9_live_runner")
 
 from config_v9 import (
     STRATEGY_VERSION,
@@ -39,10 +37,8 @@ def _get_mode() -> str:
 
 
 def _fetch_account_metrics() -> tuple[float, float, float, int]:
-    """Returns (account_equity, current_notional, effective_leverage, position_count)."""
+    """Returns (account_equity, current_notional, effective_leverage, position_count). Uses env only (no load_dotenv)."""
     try:
-        from dotenv import load_dotenv
-        load_dotenv(dotenv_path=ROOT / ".env", override=True)
         api_key = os.getenv("BINANCE_API_KEY") or os.getenv("BINANCE_FUTURES_API_KEY")
         api_secret = os.getenv("BINANCE_API_SECRET") or os.getenv("BINANCE_FUTURES_API_SECRET")
         if not api_key or not api_secret:
@@ -70,8 +66,8 @@ def _fetch_account_metrics() -> tuple[float, float, float, int]:
         return 0.0, 0.0, 0.0, 0
 
 
-def _print_startup() -> tuple[float, float, float, int]:
-    """Returns (equity, notional, lev, position_count) for status dashboard."""
+def _print_startup() -> None:
+    """Print banner and write health check file (for ops/send_v9_dashboard.py to parse)."""
     mode = _get_mode()
     commit = _get_commit_hash()
     equity, notional, lev, position_count = _fetch_account_metrics()
@@ -89,11 +85,11 @@ def _print_startup() -> tuple[float, float, float, int]:
         f"HARD_CAP_NOTIONAL={hard_cap:.2f}",
         f"current_notional={notional:.2f}",
         f"effective_leverage={lev:.4f}",
+        f"position_count={position_count}",
     ]
     line = " ".join(lines)
     print(line)
     _write_health_check(line)
-    return equity, notional, lev, position_count
 
 
 def _write_health_check(line: str):
@@ -119,47 +115,6 @@ def _get_commit_hash() -> str:
         return (r.stdout or "").strip()[:12] if r.returncode == 0 else ""
     except Exception:
         return ""
-
-
-def _send_status_dashboard(
-    equity: float,
-    notional: float,
-    lev: float,
-    position_count: int,
-    commit: str,
-) -> None:
-    """Send V9 status dashboard to Telegram. If token missing, log warning only (no crash)."""
-    try:
-        from dotenv import load_dotenv
-        load_dotenv(dotenv_path=ROOT / ".env", override=True)
-        token = (os.getenv("TELEGRAM_BOT_TOKEN") or "").strip()
-        chat_id = (os.getenv("TELEGRAM_CHAT_ID") or "").strip()
-        if not token or not chat_id:
-            _LOG.warning("TELEGRAM_BOT_TOKEN or TELEGRAM_CHAT_ID not set; skipping status dashboard")
-            print("  [WARN] TELEGRAM_BOT_TOKEN or TELEGRAM_CHAT_ID not set; skipping status dashboard")
-            return
-        from core.telegram_notifier import TelegramNotifier
-        hard_cap = equity * HARD_CAP_LEVERAGE if equity > 0 else 0.0
-        utc8 = timezone(timedelta(hours=8))
-        now_utc8 = datetime.now(utc8).strftime("%Y-%m-%d %H:%M:%S")
-        msg = (
-            "📊 <b>V9 系統狀態看板</b>\n\n"
-            f"• STRATEGY_VERSION: {STRATEGY_VERSION}\n"
-            f"• GIT_COMMIT: {commit}\n"
-            f"• account_equity: ${equity:,.2f}\n"
-            f"• HARD_CAP_NOTIONAL: ${hard_cap:,.2f}\n"
-            f"• current_notional: ${notional:,.2f}\n"
-            f"• effective_leverage: {lev:.4f}\n"
-            f"• FREEZE_UNTIL: {FREEZE_UNTIL}\n"
-            f"• 當前持倉數量: {position_count}\n"
-            f"• 執行時間 (UTC+8): {now_utc8}"
-        )
-        notifier = TelegramNotifier(bot_token=token, chat_id=chat_id, enabled=True)
-        if notifier.send_message(msg, parse_mode="HTML"):
-            print("  [OK] V9 status dashboard sent")
-    except Exception as e:
-        _LOG.warning("Failed to send V9 status dashboard: %s", e)
-        print(f"  [WARN] Failed to send V9 status dashboard: {e}")
 
 
 def run_once_paper(signal_time_utc: datetime, symbol: str, side: str, price: float, qty: float,
@@ -228,13 +183,12 @@ def run_once_micro_live(signal_time_utc: datetime, symbol: str, side: str, price
 
 
 def main():
-    equity, notional, lev, position_count = _print_startup()
+    _print_startup()
     mode = _get_mode()
     if mode == "PAPER":
         print("V9.1 PAPER mode: signal logging only (no real orders)")
     else:
         print(f"V9.1 {mode} mode: real orders")
-    _send_status_dashboard(equity, notional, lev, position_count, _get_commit_hash())
     print("Run tests/run_v9_live.py for full daily cycle (requires data fetch).")
 
 
