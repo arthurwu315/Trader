@@ -214,6 +214,30 @@ Status:
 - **LowVol MDD / non-LowVol MDD**: 0.00% / 34.75% (Baseline & V8.3 identical)
 - **Note**: 18 low-vol days in sample; 0 trades coincided. Experiment structurally correct; no observable effect in this period.
 
+### V8.4 (Experimental)
+
+- MidVol regime (2%–4%) disabled: no new entries when vol in this range
+- Only trade in LowVol (<2%) and HighVol (≥4%)
+- Goal: test whether mid-vol is the main MDD source
+
+**Backtest (Full 2022-2024 + yearly)**
+
+| Period | Version | CAGR | MDD | Calmar | PF | Win% | Trades | Exposure |
+|--------|---------|------|-----|--------|-----|------|--------|----------|
+| Full | Baseline | 8.3348 | 34.7510 | 0.2398 | 1.1294 | 47.69 | 65 | 47.93 |
+| Full | V8.4 | 8.5903 | 11.0001 | 0.7809 | 1.5325 | 43.75 | 16 | 19.55 |
+| 2022 | Baseline | -2.4556 | 6.1105 | -0.4019 | 0.6132 | 33.33 | 3 | 6.58 |
+| 2022 | V8.4 | 1.4116 | 2.3882 | 0.5911 | 1.5689 | 50.00 | 2 | 6.03 |
+| 2023 | Baseline | 21.3615 | 10.2185 | 2.0905 | 1.4689 | 57.69 | 26 | 40.00 |
+| 2023 | V8.4 | 10.7512 | 2.9731 | 3.6162 | 4.6162 | 66.67 | 3 | 11.51 |
+| 2024 | Baseline | -0.4543 | 38.9282 | -0.0117 | 0.9950 | 41.67 | 36 | 54.64 |
+| 2024 | V8.4 | 6.5921 | 12.1057 | 0.5445 | 1.2218 | 36.36 | 11 | 23.22 |
+
+- **Baseline Full**: HighVol Exposure 35.41% | MidVol Exposure 64.59% | LowVol Exposure 0.00%
+- **Baseline**: MidVol MDD = 43.01% | HighVol MDD = 11.12% → **MidVol is the main MDD source**
+- **V8.4 Full**: HighVol 100% | MidVol 0% | LowVol 0% | MidVol MDD = 0% | HighVol MDD = 11.00%
+- **Conclusion**: Blocking mid-vol cut MDD from 34.75% to 11.00%; Calmar improved 0.24 → 0.78. Hypothesis confirmed.
+
 ---
 
 ## Engineering Policy (Hard Rule)
