@@ -116,6 +116,7 @@ class ConfigV3MicroMVP:
     # ==================== 基礎設定 ====================
     version_name: str = "V3-Micro-MVP (真錢測試版)"
     strategy_tag: str = "V3_MICRO_MAINNET"
+    strategy_version: str = "V9_REGIME_CORE"  # Backtest core version (regime-filtered)
     symbol: str = "BTCUSDT"
     
     # ⚠️ 真錢環境設定

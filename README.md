@@ -263,6 +263,24 @@ Three MID block intervals tested (only block interval changes):
 
 Run: `python3 -m tests.run_v84_robustness`
 
+### V9 – Production Core
+
+- **Regime-filtered trend model**: Mid-vol (2.2–4.2%) disabled
+- **Robustness confirmed**: Calmar plateau 0.70–0.81 across threshold variants
+- **MDD reduced**: 34% → 11% (baseline vs V9)
+- **Locked params**: LOW &lt;2.2%, MID 2.2–4.2% (blocked), HIGH ≥4.2%; no further threshold optimization
+
+**Config:** `STRATEGY_VERSION = "V9_REGIME_CORE"` (`config_v9.py`, `config_a.strategy_version`)
+
+**Walk-Forward (Rolling)**
+
+| Split | Train | Test | Calmar | MDD | CAGR | Trades |
+|-------|-------|------|--------|-----|------|--------|
+| 1 | 2022–2023 | 2024 | 0.58 | 12.11% | 7.04% | 10 |
+| 2 | 2023–2024 | 2022 | 0.59 | 2.39% | 1.41% | 2 |
+
+Run: `python3 -m tests.run_v9_walkforward`
+
 ---
 
 ## Engineering Policy (Hard Rule)
