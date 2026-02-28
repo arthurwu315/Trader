@@ -277,10 +277,15 @@ class BinanceFuturesClient:
         params = {"symbol": symbol} if symbol else {}
         return self._call_with_retry("GET", "/fapi/v2/positionRisk", params, signed=True)
     
-    def get_open_orders(self, symbol: str) -> list:
-        """獲取掛單"""
-        return self._call_with_retry("GET", "/fapi/v1/openOrders", {"symbol": symbol}, signed=True)
-    
+    def get_open_orders(self, symbol: Optional[str] = None) -> list:
+        """獲取掛單。symbol=None 時回傳所有標的掛單。"""
+        params: Dict[str, Any] = {} if symbol is None else {"symbol": symbol}
+        return self._call_with_retry("GET", "/fapi/v1/openOrders", params, signed=True)
+
+    def place_order_test(self, params: Dict[str, Any]) -> None:
+        """測試下單請求（不實際執行）。用於連通性驗證。"""
+        self._call_with_retry("POST", "/fapi/v1/order/test", params, signed=True)
+
     def place_order(self, params: Dict[str, Any]) -> Dict[str, Any]:
         """下單"""
         return self._call_with_retry("POST", "/fapi/v1/order", params, signed=True)

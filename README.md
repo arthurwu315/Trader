@@ -311,6 +311,38 @@ Run: `python3 -m tests.run_v9_walkforward`
 - **Check logs**: `journalctl -u trading_bot_v9_oneshot.service`
 - **Deploy**: `./deploy_v9_timer.sh`
 
+### V9 Runtime Behavior (Trailing Stop)
+
+- **Backtest** (`run_v8_backtest._simulate_position_exit`): Trailing stop updated per 1D bar; trigger uses bar high/low (intrabar). Exit when low ≤ current_sl (BUY) or high ≥ current_sl (SELL).
+- **Live** (`protection_guard`, `execution_safety`): Fixed STOP_MARKET, no trailing update. Trigger: Mark Price. See `docs/v9/V9_TRAILING_STOP_BEHAVIOR.md`.
+
+### Ops Verification
+
+**1) Snapshot only (no orders)**
+
+```bash
+sudo systemctl start trading_bot_v9_oneshot.service
+journalctl -u trading_bot_v9_oneshot.service -n 80 --no-pager
+```
+
+**2) Order connectivity test** (set env first; default off)
+
+```bash
+sudo systemctl set-environment V9_ORDER_CONNECTIVITY_TEST=1
+sudo systemctl start trading_bot_v9_oneshot.service
+sudo systemctl unset-environment V9_ORDER_CONNECTIVITY_TEST
+journalctl -u trading_bot_v9_oneshot.service -n 120 --no-pager
+```
+
+**3) Inspect ops logs**
+
+```bash
+tail -n 5 trading_system/logs/v9_ops_snapshot.csv
+tail -n 50 trading_system/logs/v9_ops_order_test.log
+```
+
+**`v9_ops_snapshot.csv` schema**: `timestamp,account_equity,available_balance,wallet_balance,current_notional,effective_leverage,position_count,open_orders_count,positions_detail`
+
 ### Telegram Notifications (Ops)
 
 - **Env loading**: systemd services must load `/home/trader/trading_system/.env` via `EnvironmentFile` for `TELEGRAM_BOT_TOKEN` and `TELEGRAM_CHAT_ID`.
