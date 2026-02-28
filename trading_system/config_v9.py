@@ -1,6 +1,7 @@
 """
 V9 Production Core - Regime-filtered trend model.
-Locked parameters; no further threshold optimization.
+V9.1: HARD FREEZE - Strategy params & rules must not change.
+Any change requires new version (V9.2+). Do not overwrite V9.1.
 """
 STRATEGY_VERSION = "V9_REGIME_CORE"
 

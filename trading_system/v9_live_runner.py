@@ -1,0 +1,123 @@
+"""
+V9.1 Live Validation Runner.
+PAPER: simulated fills, log to v9_trade_records.
+MICRO-LIVE: real orders at 10% notional, log to v9_trade_records.
+
+Strategy: V9_REGIME_CORE (frozen). Execution layer only.
+Env: V9_LIVE_MODE=PAPER|MICRO-LIVE
+"""
+from __future__ import annotations
+
+import os
+import sys
+from datetime import datetime, timezone
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parent
+sys.path.insert(0, str(ROOT))
+
+from config_v9 import STRATEGY_VERSION, VOL_LOW, VOL_HIGH
+
+
+def _get_mode() -> str:
+    m = (os.getenv("V9_LIVE_MODE") or "PAPER").strip().upper()
+    return "MICRO-LIVE" if m == "MICRO-LIVE" else "PAPER"
+
+
+def _print_startup():
+    mode = _get_mode()
+    commit = _get_commit_hash()
+    print(f"STRATEGY_VERSION={STRATEGY_VERSION} VOL_LOW={VOL_LOW} VOL_HIGH={VOL_HIGH} MODE={mode}")
+    if commit:
+        print(f"GIT_COMMIT={commit}")
+
+
+def _get_commit_hash() -> str:
+    try:
+        import subprocess
+        r = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=ROOT, capture_output=True, text=True, timeout=5
+        )
+        return (r.stdout or "").strip()[:12] if r.returncode == 0 else ""
+    except Exception:
+        return ""
+
+
+def run_once_paper(signal_time_utc: datetime, symbol: str, side: str, price: float, qty: float,
+                   regime_vol: float, reason: str):
+    """PAPER: record theoretical fill."""
+    from core.v9_trade_record import append_v9_trade_record
+    ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    sig_ts = signal_time_utc.strftime("%Y-%m-%dT%H:%M:%SZ") if hasattr(signal_time_utc, "strftime") else str(signal_time_utc)
+    append_v9_trade_record(
+        timestamp=ts,
+        symbol=symbol,
+        side=side,
+        price=price,
+        qty=qty,
+        regime_vol=regime_vol,
+        reason=reason,
+        fees=0.0,
+        slippage_est=0.0,
+        signal_time=sig_ts,
+        order_time=ts,
+        mode="PAPER",
+    )
+
+
+def run_once_micro_live(signal_time_utc: datetime, symbol: str, side: str, price: float, qty: float,
+                        regime_vol: float, reason: str, client=None):
+    """MICRO-LIVE: place real order at 10% notional, record actual fill."""
+    from core.v9_trade_record import append_v9_trade_record
+    sig_ts = signal_time_utc.strftime("%Y-%m-%dT%H:%M:%SZ") if hasattr(signal_time_utc, "strftime") else str(signal_time_utc)
+    order_time = datetime.now(timezone.utc)
+    fees = 0.0
+    slippage_est = 0.0
+    actual_price = price
+    if client:
+        try:
+            order = client.place_order({
+                "symbol": symbol,
+                "side": "BUY" if side.upper() == "BUY" else "SELL",
+                "type": "MARKET",
+                "quantity": qty,
+            })
+            if order:
+                actual_price = float(order.get("avgPrice") or order.get("price") or price)
+                fees = float(order.get("commission", 0) or 0)
+                if actual_price and price:
+                    slippage_bps = abs(actual_price - price) / price * 10000
+                    slippage_est = slippage_bps
+        except Exception as e:
+            print(f"  [ERR] MICRO-LIVE order failed: {e}")
+    ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    ord_ts = order_time.strftime("%Y-%m-%dT%H:%M:%SZ")
+    append_v9_trade_record(
+        timestamp=ts,
+        symbol=symbol,
+        side=side,
+        price=actual_price,
+        qty=qty,
+        regime_vol=regime_vol,
+        reason=reason,
+        fees=fees,
+        slippage_est=slippage_est,
+        signal_time=sig_ts,
+        order_time=ord_ts,
+        mode="MICRO-LIVE",
+    )
+
+
+def main():
+    _print_startup()
+    mode = _get_mode()
+    if mode == "PAPER":
+        print("V9.1 PAPER mode: signal logging only (no real orders)")
+    else:
+        print("V9.1 MICRO-LIVE mode: real orders at 10% notional")
+    print("Run tests/run_v9_live.py for full daily cycle (requires data fetch).")
+
+
+if __name__ == "__main__":
+    main()

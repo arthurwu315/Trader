@@ -283,9 +283,49 @@ Run: `python3 -m tests.run_v9_walkforward`
 
 ---
 
+## V9.1 Live Validation Plan
+
+- **Strategy**: V9_REGIME_CORE (Frozen) — 策略邏輯禁止更動，變更一律開新版本號 (V9.2+)
+- **Modes**: PAPER / MICRO-LIVE
+- **Position**: MICRO-LIVE uses 10% notional (of base 40%)
+- **What we validate**:
+  1) fees & slippage
+  2) latency (signal_time vs order_time)
+  3) execution correctness
+- **Exit Criteria (Promotion)**:
+  - ≥ 30 trades OR ≥ 8 weeks (whichever first)
+  - PF not &lt; 0.9 in MICRO-LIVE
+  - No governance violations (no untracked changes)
+- **Kill Switch**: If equity drawdown in MICRO-LIVE &gt; 3% or any abnormal behavior → stop bot
+
+**Trade record**: `logs/v9_trade_records.csv` (same format for PAPER & MICRO-LIVE)
+
+| Field | Description |
+|-------|-------------|
+| timestamp | Fill/exchange time |
+| symbol | Trading pair |
+| side | BUY / SELL |
+| price | Fill price |
+| qty | Quantity |
+| regime_vol | Vol % at entry |
+| reason | entry / exit |
+| fees | Transaction fees |
+| slippage_est | Slippage (bp, optional) |
+| signal_time | Signal generation time |
+| order_time | Order send time |
+| mode | PAPER / MICRO-LIVE |
+
+**Friction report**: `python3 -m tests.run_v9_friction_report`
+
+**Deploy**: `./deploy_v9.sh [commit_hash]` — Production must lock commit hash (`logs/deploy_hash.txt`)
+
+---
+
 ## Engineering Policy (Hard Rule)
 
 1. **任何策略/參數/部署變更都必須更新 README.md**
 2. **必須 commit 並 git push 才算完成**
 3. **README 需包含**：變更目的、影響範圍、回測對照表、以及是否影響風控
 4. **任何 service/部署檔變更** 必須在 README 記錄「檔名 + 變更點 + 回滾方法」
+5. **任何部署模式/服務檔變更** 也必須記錄並 push
+6. **Production 必須鎖定 commit hash**（在 service 或 config 明記；可用 deploy_v9.sh）

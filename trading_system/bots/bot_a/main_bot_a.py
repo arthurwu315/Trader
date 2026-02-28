@@ -50,6 +50,14 @@ from core.emergency_handler import EmergencyHandler
 # 載入配置並執行安全檢查
 config = get_micro_mvp_config()
 
+# V9.1: startup banner (STRATEGY_VERSION, VOL_LOW, VOL_HIGH, MODE, GIT_COMMIT)
+try:
+    from core.startup_banner import print_startup_banner, get_commit_hash
+    mode = os.getenv("V9_LIVE_MODE", "LIVE")  # main_bot_a = LIVE (not PAPER/MICRO-LIVE)
+    print_startup_banner(mode)
+except Exception:
+    pass
+
 # 設定日誌
 logging.basicConfig(
     level=getattr(logging, config.log_level),
