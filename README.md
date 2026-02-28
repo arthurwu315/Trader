@@ -477,6 +477,32 @@ cat STRATEGY_STATE_ALPHA_BURST.md
 
 ---
 
+## Alpha Burst B2 COMPRESS (ALPHA_BURST_B2_COMPRESS)
+
+- **Purpose**: Compression → expansion burst（不沿用 B1 Donchian breakout）
+- **Universe**: BTCUSDT, ETHUSDT
+- **Trend filter**: 4H EMA200（同 B1）
+- **Entry**: 壓縮後首次波動擴張 + close 突破壓縮區間 high/low
+- **Exit**: ATR×k 止損 + ATR 追蹤
+- **Trade record**: `logs/alpha_burst_b2_trades.csv`；v9 `strategy_id=ALPHA_BURST_B2_COMPRESS`
+
+**Commands**
+
+- Backtest: `python3 -m tests.run_alpha_burst_b2_backtest`
+- Report: `python3 -m tests.run_alpha_burst_b2_report` → `tests/reports/alpha_burst_b2_report.md`
+- Grid (optional): `python3 -m tests.run_alpha_burst_b2_grid` → `tests/reports/alpha_burst_b2_artifacts/b2_grid_results.csv`
+
+**上線門檻**
+
+B2 預設不得 micro-live。僅在以下條件均滿足時可考慮上線：
+- E[R] > 0
+- Permutation p < 0.05
+- 成本壓力（5/10/20 bps）下 E[R] 仍為正
+
+**State doc**: `STRATEGY_STATE_ALPHA_BURST_B2.md`
+
+---
+
 ## Engineering Policy (Hard Rule)
 
 1. **任何策略/參數/部署變更都必須更新 README.md**

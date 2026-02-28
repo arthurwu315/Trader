@@ -288,6 +288,103 @@ def append_burst_trade_record(
             pass
 
 
+BURST_B2_TRADE_HEADER = (
+    "timestamp,symbol,side,entry_price,stop_price,exit_price,qty,initial_risk_usdt,"
+    "pnl_usdt,R_multiple,holding_bars,strategy_id,compression_flag,armed_flag,"
+    "expansion_flag,compression_high,compression_low,entry_breakout_side"
+)
+
+
+def get_burst_b2_trades_path() -> Path:
+    """Path for ALPHA_BURST_B2_COMPRESS trade records."""
+    return ensure_log_dir() / "alpha_burst_b2_trades.csv"
+
+
+def append_burst_b2_trade_record(
+    timestamp: str,
+    symbol: str,
+    side: str,
+    entry_price: float,
+    stop_price: float,
+    exit_price: float,
+    qty: float,
+    initial_risk_usdt: float,
+    pnl_usdt: float,
+    R_multiple: float,
+    holding_bars: int,
+    compression_flag: bool,
+    armed_flag: bool,
+    expansion_flag: bool,
+    compression_high: float,
+    compression_low: float,
+    entry_breakout_side: str,
+    write_to_v9: bool = True,
+) -> None:
+    """Append one B2 burst trade. Writes to logs/alpha_burst_b2_trades.csv."""
+    burst_path = get_burst_b2_trades_path()
+    burst_path.parent.mkdir(parents=True, exist_ok=True)
+    if not burst_path.exists():
+        with open(burst_path, "w", encoding="utf-8", newline="") as f:
+            f.write(BURST_B2_TRADE_HEADER + "\n")
+    try:
+        with open(burst_path, "a", encoding="utf-8", newline="") as f:
+            f.write(
+                f"{timestamp},{symbol},{side},{entry_price:.8f},{stop_price:.8f},{exit_price:.8f},"
+                f"{qty:.8f},{initial_risk_usdt:.4f},{pnl_usdt:.4f},{R_multiple:.4f},{holding_bars},"
+                f"ALPHA_BURST_B2_COMPRESS,{str(compression_flag).lower()},{str(armed_flag).lower()},"
+                f"{str(expansion_flag).lower()},{compression_high:.8f},{compression_low:.8f},{entry_breakout_side}\n"
+            )
+    except Exception as e:
+        print(f"  [WARN] append_burst_b2_trade_record: {e}")
+    if write_to_v9:
+        try:
+            append_v9_trade_record(
+                timestamp=timestamp,
+                symbol=symbol,
+                side=side,
+                price=exit_price,
+                qty=qty,
+                regime_vol=R_multiple,
+                reason="BURST_B2_EXIT",
+                fees=0.0,
+                slippage_est=0.0,
+                signal_time=timestamp,
+                order_time=timestamp,
+                mode="PAPER",
+                strategy_id="ALPHA_BURST_B2_COMPRESS",
+                event_type="TRADE",
+            )
+        except Exception:
+            pass
+
+
+def read_burst_b2_trades(csv_path: Path = None):
+    """Read ALPHA_BURST_B2_COMPRESS trade records. Returns list of dicts."""
+    if csv_path is None:
+        csv_path = get_burst_b2_trades_path()
+    if not csv_path.exists():
+        return []
+    rows = []
+    with open(csv_path, "r", encoding="utf-8") as f:
+        r = csv.DictReader(f)
+        for row in r:
+            try:
+                row["entry_price"] = float(row.get("entry_price", 0))
+                row["stop_price"] = float(row.get("stop_price", 0))
+                row["exit_price"] = float(row.get("exit_price", 0))
+                row["qty"] = float(row.get("qty", 0))
+                row["initial_risk_usdt"] = float(row.get("initial_risk_usdt", 0))
+                row["pnl_usdt"] = float(row.get("pnl_usdt", 0))
+                row["R_multiple"] = float(row.get("R_multiple", 0))
+                row["holding_bars"] = int(float(row.get("holding_bars", 0)))
+                row["compression_high"] = float(row.get("compression_high", 0))
+                row["compression_low"] = float(row.get("compression_low", 0))
+            except (ValueError, KeyError):
+                pass
+            rows.append(row)
+    return rows
+
+
 def read_burst_trades(csv_path: Path = None):
     """Read ALPHA_BURST_B1 trade records. Returns list of dicts."""
     if csv_path is None:
