@@ -104,3 +104,32 @@ def should_hard_stop(rebalance_fail_threshold: int = 3) -> bool:
         s.get("rebalance_fail_count", 0) >= rebalance_fail_threshold
         or s.get("consecutive_out_of_threshold", 0) >= rebalance_fail_threshold
     )
+
+
+def get_state_summary() -> dict:
+    """Return state for banner: rebalance_fail_count, consecutive_out_of_threshold, hard_stop_triggered."""
+    s = load_state()
+    fail = s.get("rebalance_fail_count", 0)
+    consec = s.get("consecutive_out_of_threshold", 0)
+    return {
+        "rebalance_fail_count": fail,
+        "consecutive_out_of_threshold": consec,
+        "hard_stop_triggered": fail >= 3 or consec >= 3,
+    }
+
+
+def get_cooldown_active() -> list[tuple[str, str]]:
+    """Return [(symbol, until_iso)] for symbols still in cooldown."""
+    d = load_cooldown()
+    now = datetime.now(timezone.utc)
+    out = []
+    for sym, until_s in d.items():
+        if not until_s:
+            continue
+        try:
+            until = datetime.fromisoformat(until_s.replace("Z", "+00:00"))
+            if now < until:
+                out.append((sym, until_s))
+        except Exception:
+            pass
+    return out

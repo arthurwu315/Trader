@@ -375,9 +375,21 @@ Run: `python3 -m tests.run_v9_walkforward`
 - Exit due to annualized &lt; 10% or ≤ 0 ⇒ 24h cooldown for that symbol
 - During cooldown: no entry, only CYCLE record with `reason=COOLDOWN`
 
+**Notional / NA rules**
+
+- CYCLE spot_notional, perp_notional, net_notional, net_notional_pct: computed from price × simulated position when available
+- When price unavailable: write `NA` (empty/NA) and append `NOTIONAL_UNAVAILABLE` to reason — do not write fixed 0
+
+**Self-test (PAPER only)**
+
+- `ALPHA2_SELF_TEST=1 python3 -m bots.bot_funding_carry.main`
+- Simulates net_notional_pct &gt; threshold → rebalance_action=REBALANCE → rebalance fail count → hard stop after 3 fails
+- No real orders; validates hedge-deviation → rebalance → hard-stop chain
+
 **Report**: `python3 -m tests.run_funding_carry_report`
 
-- KPIs (last 7 days): max_abs_net_notional_pct, rebalance_count, rebalance_fail_count, cooldown_count
+- KPIs (last 7 days): max_abs_net_notional_pct (excludes NA; "notional unavailable" if all NA), rebalance_count, rebalance_fail_count, cooldown_count, hard_stop_triggered
+- Does not treat fixed 0 as hedge-stable evidence
 - With 0 TRADE events: outputs KPIs + latest funding snapshot + signal count
 - With trades: funding collected proxy, fees, slippage
 - Diagnostic: when no FUND_CARRY_V1 records, prints file path, row count, strategy_id distribution

@@ -180,6 +180,13 @@ def append_v9_trade_record(
         print(f"  [WARN] append_v9_trade_record JSONL: {e}")
 
 
+def _fmt_notional(v: float | None) -> str:
+    """Format notional: None -> NA, else numeric."""
+    if v is None:
+        return "NA"
+    return f"{v:.4f}"
+
+
 def append_funding_carry_cycle(
     timestamp: str,
     symbol: str,
@@ -189,15 +196,15 @@ def append_funding_carry_cycle(
     signal: bool,
     reason: str,
     strategy_id: str = "FUND_CARRY_V1",
-    spot_notional: float = 0.0,
-    perp_notional: float = 0.0,
-    net_notional: float = 0.0,
-    net_notional_pct: float = 0.0,
+    spot_notional: float | None = None,
+    perp_notional: float | None = None,
+    net_notional: float | None = None,
+    net_notional_pct: float | None = None,
     rebalance_action: str = "NONE",
     rebalance_attempt: bool = False,
     rebalance_success: bool = True,
 ) -> None:
-    """Append Alpha2 CYCLE record with hedge/rebalance fields."""
+    """Append Alpha2 CYCLE record with hedge/rebalance fields. None => NA."""
     csv_path = get_v9_records_path()
     _ensure_header_and_extended(csv_path, use_extended=True)
     _ensure_funding_carry_header(csv_path)
@@ -206,7 +213,8 @@ def append_funding_carry_cycle(
             f"{timestamp},{symbol},CYCLE,0,0,{funding_annualized_pct:.4f},{reason},"
             f"0,0,{timestamp},{timestamp},{mode},{strategy_id},"
             f"CYCLE,{funding_rate_8h:.8f},{funding_annualized_pct:.2f},{str(signal).lower()},"
-            f"{spot_notional:.4f},{perp_notional:.4f},{net_notional:.4f},{net_notional_pct:.4f},"
+            f"{_fmt_notional(spot_notional)},{_fmt_notional(perp_notional)},"
+            f"{_fmt_notional(net_notional)},{_fmt_notional(net_notional_pct)},"
             f"{rebalance_action},{str(rebalance_attempt).lower()},{str(rebalance_success).lower()}\n"
         )
 

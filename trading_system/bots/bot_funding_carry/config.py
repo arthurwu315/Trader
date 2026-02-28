@@ -17,3 +17,6 @@ PAPER_DAYS_FIRST = 7
 HEDGE_DEVIATION_PCT_THRESHOLD = 0.002  # 0.20% => must REBALANCE
 REBALANCE_FAIL_HARD_STOP = 3  # consecutive fails or cycles out => stop bot
 COOLDOWN_HOURS = 24  # no entry for 24h after exit (annualized < 10% or <= 0)
+
+# PAPER simulated notional (for observability when no real positions)
+PAPER_SIMULATED_EQUITY = 10000.0

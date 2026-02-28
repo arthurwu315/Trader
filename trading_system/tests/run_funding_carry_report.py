@@ -77,9 +77,9 @@ def main():
     else:
         print("Trades: 0")
 
-    # KPI: max_abs_net_notional_pct, rebalance_count, rebalance_fail_count, cooldown_count
+    # KPI: max_abs_net_notional_pct (exclude NA), rebalance_count, rebalance_fail_count, cooldown_count
     cutoff = datetime.now(timezone.utc) - timedelta(days=7)
-    max_abs_net = 0.0
+    max_abs_net: float | None = None  # None = no valid data
     rebalance_count = 0
     rebalance_fail_count = 0
     cooldown_count = 0
@@ -88,17 +88,20 @@ def main():
         if t:
             t_utc = t.replace(tzinfo=timezone.utc) if not t.tzinfo else t
             if t_utc >= cutoff:
-                try:
-                    v = abs(float(r.get("net_notional_pct", 0) or 0))
-                    if v > max_abs_net:
-                        max_abs_net = v
-                except (TypeError, ValueError):
-                    pass
+                # Exclude NA: do not treat 0 or NA as hedge-stable evidence
+                raw = r.get("net_notional_pct", "")
+                if raw not in ("", "NA", None) and "NOTIONAL_UNAVAILABLE" not in str(r.get("reason", "")):
+                    try:
+                        v = abs(float(raw))
+                        if max_abs_net is None or v > max_abs_net:
+                            max_abs_net = v
+                    except (TypeError, ValueError):
+                        pass
                 if r.get("rebalance_action") == "REBALANCE":
                     rebalance_count += 1
                 if str(r.get("rebalance_attempt", "")).lower() == "true" and str(r.get("rebalance_success", "")).lower() != "true":
                     rebalance_fail_count += 1
-                if r.get("reason") == "COOLDOWN":
+                if r.get("reason", "").startswith("COOLDOWN"):
                     cooldown_count += 1
 
     # REBALANCE_FAIL in any carry record (TRADE or CYCLE)
@@ -110,12 +113,25 @@ def main():
                 if t_utc >= cutoff:
                     rebalance_fail_count += 1
 
+    # Hard stop status from state file
+    try:
+        from bots.bot_funding_carry.state import get_state_summary
+        ss = get_state_summary()
+        hard_stop_triggered = ss.get("hard_stop_triggered", False)
+    except Exception:
+        hard_stop_triggered = False
+
     print("-" * 40)
     print("Hedge / Rebalance KPIs (last 7 days):")
-    print(f"  max_abs_net_notional_pct: {max_abs_net:.4f}%")
+    if max_abs_net is not None:
+        print(f"  max_abs_net_notional_pct: {max_abs_net:.4f}%")
+    else:
+        print("  max_abs_net_notional_pct: notional unavailable (all NA or no valid data)")
     print(f"  rebalance_count: {rebalance_count}")
     print(f"  rebalance_fail_count: {rebalance_fail_count}")
     print(f"  cooldown_count: {cooldown_count}")
+    if hard_stop_triggered:
+        print("  hard_stop_triggered: True")
 
     if cycles:
         # Latest funding snapshot (most recent per symbol)
