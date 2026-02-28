@@ -18,6 +18,11 @@ V9_TRADE_RECORD_HEADER_EXTENDED = (
     V9_TRADE_RECORD_HEADER
     + ",event_type,funding_rate_8h,funding_annualized_pct,signal"
 )
+V9_FUNDING_CARRY_EXTENDED = (
+    V9_TRADE_RECORD_HEADER_EXTENDED
+    + ",spot_notional,perp_notional,net_notional,net_notional_pct,"
+    "rebalance_action,rebalance_attempt,rebalance_success"
+)
 
 
 def ensure_log_dir() -> Path:
@@ -35,6 +40,38 @@ def get_v9_records_json_path() -> Path:
     return ensure_log_dir() / "v9_trade_records.jsonl"
 
 
+def _ensure_funding_carry_header(csv_path: Path) -> None:
+    """If file exists without funding carry columns, migrate to full Alpha2 header."""
+    if not csv_path.exists():
+        return
+    try:
+        with open(csv_path, "r", encoding="utf-8") as f:
+            first = f.readline().strip()
+        if "spot_notional" in first and "rebalance_action" in first:
+            return
+        with open(csv_path, "r", encoding="utf-8") as f:
+            reader = csv.DictReader(f)
+            rows = list(reader)
+        fc_fieldnames = [
+            "timestamp", "symbol", "side", "price", "qty", "regime_vol", "reason",
+            "fees", "slippage_est", "signal_time", "order_time", "mode", "strategy_id",
+            "event_type", "funding_rate_8h", "funding_annualized_pct", "signal",
+            "spot_notional", "perp_notional", "net_notional", "net_notional_pct",
+            "rebalance_action", "rebalance_attempt", "rebalance_success",
+        ]
+        with open(csv_path, "w", encoding="utf-8", newline="") as f:
+            f.write(V9_FUNDING_CARRY_EXTENDED + "\n")
+            w = csv.DictWriter(f, fieldnames=fc_fieldnames, extrasaction="ignore")
+            for r in rows:
+                for k in ("event_type", "funding_rate_8h", "funding_annualized_pct", "signal",
+                          "spot_notional", "perp_notional", "net_notional", "net_notional_pct",
+                          "rebalance_action", "rebalance_attempt", "rebalance_success"):
+                    r.setdefault(k, "")
+                w.writerow(r)
+    except Exception:
+        pass
+
+
 def _ensure_extended_header(csv_path: Path) -> None:
     """If file exists with old header, migrate to extended header."""
     if not csv_path.exists():
@@ -43,8 +80,8 @@ def _ensure_extended_header(csv_path: Path) -> None:
         with open(csv_path, "r", encoding="utf-8") as f:
             first = f.readline().strip()
         if "event_type" in first:
+            _ensure_funding_carry_header(csv_path)
             return
-        # Migrate: read all rows, rewrite with extended header
         with open(csv_path, "r", encoding="utf-8") as f:
             reader = csv.DictReader(f)
             rows = list(reader)
@@ -52,15 +89,17 @@ def _ensure_extended_header(csv_path: Path) -> None:
             "timestamp", "symbol", "side", "price", "qty", "regime_vol", "reason",
             "fees", "slippage_est", "signal_time", "order_time", "mode", "strategy_id",
             "event_type", "funding_rate_8h", "funding_annualized_pct", "signal",
+            "spot_notional", "perp_notional", "net_notional", "net_notional_pct",
+            "rebalance_action", "rebalance_attempt", "rebalance_success",
         ]
         with open(csv_path, "w", encoding="utf-8", newline="") as f:
-            f.write(V9_TRADE_RECORD_HEADER_EXTENDED + "\n")
+            f.write(V9_FUNDING_CARRY_EXTENDED + "\n")
             w = csv.DictWriter(f, fieldnames=ext_fieldnames, extrasaction="ignore")
             for r in rows:
-                r.setdefault("event_type", "")
-                r.setdefault("funding_rate_8h", "")
-                r.setdefault("funding_annualized_pct", "")
-                r.setdefault("signal", "")
+                for k in ("event_type", "funding_rate_8h", "funding_annualized_pct", "signal",
+                          "spot_notional", "perp_notional", "net_notional", "net_notional_pct",
+                          "rebalance_action", "rebalance_attempt", "rebalance_success"):
+                    r.setdefault(k, "")
                 w.writerow(r)
     except Exception:
         pass
@@ -128,7 +167,8 @@ def append_v9_trade_record(
             f.write(
                 f"{timestamp},{symbol},{side},{price:.8f},{qty:.8f},{regime_vol:.4f},{reason},"
                 f"{fees:.4f},{slippage_est:.4f},{signal_time},{order_time},{mode},{strategy_id},"
-                f"{event_type or ''},{funding_rate_8h or ''},{funding_annualized_pct or ''},{signal or ''}\n"
+                f"{event_type or ''},{funding_rate_8h or ''},{funding_annualized_pct or ''},{signal or ''},"
+                f",,,,,,,\n"
             )
     except Exception as e:
         print(f"  [WARN] append_v9_trade_record CSV: {e}")
@@ -149,15 +189,25 @@ def append_funding_carry_cycle(
     signal: bool,
     reason: str,
     strategy_id: str = "FUND_CARRY_V1",
+    spot_notional: float = 0.0,
+    perp_notional: float = 0.0,
+    net_notional: float = 0.0,
+    net_notional_pct: float = 0.0,
+    rebalance_action: str = "NONE",
+    rebalance_attempt: bool = False,
+    rebalance_success: bool = True,
 ) -> None:
-    """Append Alpha2 CYCLE record. Always called every PAPER cycle per symbol."""
+    """Append Alpha2 CYCLE record with hedge/rebalance fields."""
     csv_path = get_v9_records_path()
     _ensure_header_and_extended(csv_path, use_extended=True)
+    _ensure_funding_carry_header(csv_path)
     with open(csv_path, "a", encoding="utf-8", newline="") as f:
         f.write(
             f"{timestamp},{symbol},CYCLE,0,0,{funding_annualized_pct:.4f},{reason},"
             f"0,0,{timestamp},{timestamp},{mode},{strategy_id},"
-            f"CYCLE,{funding_rate_8h:.8f},{funding_annualized_pct:.2f},{str(signal).lower()}\n"
+            f"CYCLE,{funding_rate_8h:.8f},{funding_annualized_pct:.2f},{str(signal).lower()},"
+            f"{spot_notional:.4f},{perp_notional:.4f},{net_notional:.4f},{net_notional_pct:.4f},"
+            f"{rebalance_action},{str(rebalance_attempt).lower()},{str(rebalance_success).lower()}\n"
         )
 
 

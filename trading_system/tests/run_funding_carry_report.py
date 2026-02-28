@@ -77,6 +77,46 @@ def main():
     else:
         print("Trades: 0")
 
+    # KPI: max_abs_net_notional_pct, rebalance_count, rebalance_fail_count, cooldown_count
+    cutoff = datetime.now(timezone.utc) - timedelta(days=7)
+    max_abs_net = 0.0
+    rebalance_count = 0
+    rebalance_fail_count = 0
+    cooldown_count = 0
+    for r in cycles:
+        t = _parse_ts(r.get("timestamp", ""))
+        if t:
+            t_utc = t.replace(tzinfo=timezone.utc) if not t.tzinfo else t
+            if t_utc >= cutoff:
+                try:
+                    v = abs(float(r.get("net_notional_pct", 0) or 0))
+                    if v > max_abs_net:
+                        max_abs_net = v
+                except (TypeError, ValueError):
+                    pass
+                if r.get("rebalance_action") == "REBALANCE":
+                    rebalance_count += 1
+                if str(r.get("rebalance_attempt", "")).lower() == "true" and str(r.get("rebalance_success", "")).lower() != "true":
+                    rebalance_fail_count += 1
+                if r.get("reason") == "COOLDOWN":
+                    cooldown_count += 1
+
+    # REBALANCE_FAIL in any carry record (TRADE or CYCLE)
+    for r in carry:
+        if r.get("reason") == "REBALANCE_FAIL":
+            t = _parse_ts(r.get("timestamp", ""))
+            if t:
+                t_utc = t.replace(tzinfo=timezone.utc) if not t.tzinfo else t
+                if t_utc >= cutoff:
+                    rebalance_fail_count += 1
+
+    print("-" * 40)
+    print("Hedge / Rebalance KPIs (last 7 days):")
+    print(f"  max_abs_net_notional_pct: {max_abs_net:.4f}%")
+    print(f"  rebalance_count: {rebalance_count}")
+    print(f"  rebalance_fail_count: {rebalance_fail_count}")
+    print(f"  cooldown_count: {cooldown_count}")
+
     if cycles:
         # Latest funding snapshot (most recent per symbol)
         seen = {}
@@ -96,7 +136,6 @@ def main():
             print(f"  {sym}: {annual:.2f}% | reason={reason}")
 
         # Signal count in last 7 days
-        cutoff = datetime.now(timezone.utc) - timedelta(days=7)
         signal_count = 0
         for r in cycles:
             if r.get("reason") not in ("ENTRY_SIGNAL", "EXIT_SIGNAL") and str(r.get("signal", "")).lower() != "true":

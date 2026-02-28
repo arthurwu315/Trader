@@ -12,3 +12,8 @@ SINGLE_ASSET_LOSS_CAP_PCT = 0.01
 ALPHA2_CAPITAL_PCT = 0.10
 SINGLE_ASSET_CAP_PCT = 0.025
 PAPER_DAYS_FIRST = 7
+
+# Hedge deviation hard limits (engineering guardrails)
+HEDGE_DEVIATION_PCT_THRESHOLD = 0.002  # 0.20% => must REBALANCE
+REBALANCE_FAIL_HARD_STOP = 3  # consecutive fails or cycles out => stop bot
+COOLDOWN_HOURS = 24  # no entry for 24h after exit (annualized < 10% or <= 0)

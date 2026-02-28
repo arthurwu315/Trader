@@ -358,11 +358,27 @@ Run: `python3 -m tests.run_v9_walkforward`
 | funding_rate_8h | 8h funding rate (CYCLE only) |
 | funding_annualized_pct | Annualized % (CYCLE only) |
 | signal | true/false (CYCLE only) |
-| reason | NO_SIGNAL \| ENTRY_SIGNAL \| EXIT_SIGNAL (CYCLE); entry/exit (TRADE) |
+| reason | NO_SIGNAL \| ENTRY_SIGNAL \| EXIT_SIGNAL \| COOLDOWN \| REBALANCE_FAIL (CYCLE); entry/exit (TRADE) |
+| spot_notional, perp_notional, net_notional | Position notionals (CYCLE) |
+| net_notional_pct | Net vs equity % (CYCLE) |
+| rebalance_action | NONE \| REBALANCE \| EXIT \| KILL |
+| rebalance_attempt, rebalance_success | Boolean (CYCLE) |
+
+**Hedge deviation hard limits**
+
+- `abs(net_notional_pct) > 0.20%` ⇒ must trigger REBALANCE
+- Consecutive 3 cycles out of threshold or 3 rebalance fails ⇒ **hard stop** (bot exits)
+- Order/API exceptions: write `reason=REBALANCE_FAIL` to trade_records and count toward hard stop
+
+**Cooldown (anti-churn)**
+
+- Exit due to annualized &lt; 10% or ≤ 0 ⇒ 24h cooldown for that symbol
+- During cooldown: no entry, only CYCLE record with `reason=COOLDOWN`
 
 **Report**: `python3 -m tests.run_funding_carry_report`
 
-- With 0 TRADE events: outputs "Trades: 0" + latest funding snapshot (annualized %) + signal count (last 7 days)
+- KPIs (last 7 days): max_abs_net_notional_pct, rebalance_count, rebalance_fail_count, cooldown_count
+- With 0 TRADE events: outputs KPIs + latest funding snapshot + signal count
 - With trades: funding collected proxy, fees, slippage
 - Diagnostic: when no FUND_CARRY_V1 records, prints file path, row count, strategy_id distribution
 
