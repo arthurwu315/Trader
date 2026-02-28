@@ -85,7 +85,13 @@ File: `logs/alpha_burst_b1_trades.csv`
 
 ---
 
-## 6. Commands
+## 6. Statistical Validation (SEED=42)
+
+- **Permutation test**: 1000 shuffles; sample entry bars within allowed set; preserve holding_bars distribution
+- **Block bootstrap**: 1000 paths; block_size=7 days; bootstrap trade-level R
+- **Cost assumptions**: fee taker 0.04%; slippage 5/10/20 bps; high-vol 2x
+
+## 7. Commands
 
 ```bash
 # Backtest (produces trades)
@@ -96,14 +102,24 @@ python3 -m tests.run_alpha_burst_report
 
 # Grid (B2)
 python3 -m tests.run_alpha_burst_grid
+
+# PAPER / MICRO-LIVE (direct run)
+ALPHA_BURST_MODE=PAPER python3 -m bots.bot_alpha_burst.main
+ALPHA_BURST_MODE=MICRO-LIVE python3 -m bots.bot_alpha_burst.main
 ```
 
----
+## 8. Acceptance
 
-## 7. Independence
+```bash
+python3 -m tests.run_alpha_burst_report
+grep ALPHA_BURST_B1 logs/v9_trade_records.csv | tail -n 20
+cat STRATEGY_STATE_ALPHA_BURST.md
+```
+
+## 9. Independence
 
 - **Do NOT modify**: config_v9.py, config_a.py, v9_live_runner.py, deploy_v9.sh, bot_a
-- Alpha Burst uses `append_burst_trade_record()` in core/v9_trade_record.py
+- Alpha Burst uses `append_burst_trade_record()` in core/v9_trade_record.py (write_to_v9=True → v9_trade_records.csv)
 - V9 logic unchanged
 
 ---

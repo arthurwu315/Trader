@@ -438,6 +438,16 @@ Run: `python3 -m tests.run_v9_walkforward`
 - Backtest: `python3 -m tests.run_alpha_burst_backtest`
 - Report: `python3 -m tests.run_alpha_burst_report` → `tests/reports/alpha_burst_b1_report.md`
 - Grid (B2): `python3 -m tests.run_alpha_burst_grid` → `tests/reports/alpha_burst_b1_artifacts/b2_grid_results.csv`
+- PAPER: `ALPHA_BURST_MODE=PAPER python3 -m bots.bot_alpha_burst.main`
+- MICRO-LIVE: `ALPHA_BURST_MODE=MICRO-LIVE python3 -m bots.bot_alpha_burst.main`
+
+**Acceptance**
+
+```bash
+python3 -m tests.run_alpha_burst_report
+grep ALPHA_BURST_B1 logs/v9_trade_records.csv | tail -n 20
+cat STRATEGY_STATE_ALPHA_BURST.md
+```
 
 **Report sections**
 

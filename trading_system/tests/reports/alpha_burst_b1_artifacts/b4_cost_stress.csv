@@ -1,0 +1,5 @@
+Scenario,E[R]_stressed,WinRate_stressed,Avg_cost_R
+slippage_5bps,-0.1818,33.6%,0.1332
+slippage_10bps,-0.2484,29.6%,0.1998
+slippage_20bps,-0.3815,25.3%,0.3329
+high_vol_2.0x,-0.0486,38.4%,N/A (2x risk)

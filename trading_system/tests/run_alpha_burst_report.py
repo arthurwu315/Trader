@@ -281,7 +281,19 @@ def main():
     b3 = _run_b3(trades, ARTIFACTS_DIR)
     b4 = _run_b4(trades, ARTIFACTS_DIR)
 
-    content = "\n".join(header) + "\n" + b1 + "\n" + b2 + "\n" + b3 + "\n" + b4
+    footer = [
+        "",
+        "---",
+        "",
+        "## Acceptance",
+        "",
+        "```bash",
+        "python3 -m tests.run_alpha_burst_report",
+        "grep ALPHA_BURST_B1 logs/v9_trade_records.csv | tail -n 20",
+        "cat STRATEGY_STATE_ALPHA_BURST.md",
+        "```",
+    ]
+    content = "\n".join(header) + "\n" + b1 + "\n" + b2 + "\n" + b3 + "\n" + b4 + "\n" + "\n".join(footer)
     with open(report_path, "w") as f:
         f.write(content)
 

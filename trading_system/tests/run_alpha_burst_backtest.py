@@ -182,6 +182,7 @@ def run_backtest(
                 R_multiple=R_multiple,
                 holding_bars=holding_bars,
                 strategy_id=STRATEGY_ID,
+                write_to_v9=True,
             )
             i = exit_idx + 1
 
