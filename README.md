@@ -238,6 +238,31 @@ Status:
 - **V8.4 Full**: HighVol 100% | MidVol 0% | LowVol 0% | MidVol MDD = 0% | HighVol MDD = 11.00%
 - **Conclusion**: Blocking mid-vol cut MDD from 34.75% to 11.00%; Calmar improved 0.24 → 0.78. Hypothesis confirmed.
 
+**V8.4 Robustness Test (mid-vol threshold)**
+
+Three MID block intervals tested (only block interval changes):
+
+| Config | MID block | Full CAGR | Full MDD | Full Calmar | Full PF | Trades | Exposure |
+|--------|-----------|-----------|----------|-------------|---------|--------|----------|
+| 1 | 1.8–3.8% | 8.54 | 12.27 | 0.696 | 1.33 | 23 | 23.83 |
+| 2 | 2.0–4.0% (baseline) | 8.59 | 11.00 | 0.781 | 1.53 | 16 | 19.55 |
+| 3 | 2.2–4.2% | 8.88 | 11.00 | 0.808 | 1.66 | 15 | 16.71 |
+
+**By year**
+
+| Config | 2022 Calmar | 2023 Calmar | 2024 Calmar |
+|--------|-------------|-------------|-------------|
+| 1.8–3.8% | 0.59 | 0.36 | 1.13 |
+| 2.0–4.0% | 0.59 | 3.62 | 0.54 |
+| 2.2–4.2% | 0.59 | 3.62 | 0.58 |
+
+**Answers**
+1. Calmar > 0.6 for all? **Yes** (0.70, 0.78, 0.81)
+2. Plateau exists? **Yes** (Calmar range 0.11 < 0.15)
+3. Most stable? **2.2–4.2%** (highest Calmar 0.81)
+
+Run: `python3 -m tests.run_v84_robustness`
+
 ---
 
 ## Engineering Policy (Hard Rule)

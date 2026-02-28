@@ -126,8 +126,10 @@ def build_btc_low_vol_set(data_map: dict) -> set:
     return s
 
 
-def build_btc_mid_vol_set(data_map: dict) -> set:
-    """Set of 'YYYY-MM-DD' date strings where 2% <= BTC vol < 4% (MID_VOL regime)."""
+def build_btc_mid_vol_set(data_map: dict, vol_low: float = None, vol_high: float = None) -> set:
+    """Set of 'YYYY-MM-DD' date strings where vol_low <= BTC vol < vol_high (MID_VOL regime)."""
+    vl = vol_low if vol_low is not None else VOL_LOW
+    vh = vol_high if vol_high is not None else VOL_HIGH
     btc = data_map["BTCUSDT"]["1d"]
     atr20 = btc["atr_20"].values
     close = btc["close"].astype(float).values
@@ -137,7 +139,7 @@ def build_btc_mid_vol_set(data_map: dict) -> set:
         if close[i] <= 0 or not np.isfinite(atr20[i]):
             continue
         vol_pct = atr20[i] / close[i] * 100.0
-        if VOL_LOW <= vol_pct < VOL_HIGH:
+        if vl <= vol_pct < vh:
             t = to_utc_ts(ts_arr[i])
             s.add(t.strftime("%Y-%m-%d"))
     return s
