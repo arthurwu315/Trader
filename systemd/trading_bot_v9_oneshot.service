@@ -6,6 +6,7 @@ After=network-online.target
 Type=oneshot
 User=trader
 WorkingDirectory=/home/trader/trading_system
+EnvironmentFile=-/home/trader/trading_system/.env
 Environment=V9_LIVE_MODE=LIVE
 ExecStart=/usr/bin/python3 -u -m v9_live_runner
 StandardOutput=journal

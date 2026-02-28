@@ -311,6 +311,12 @@ Run: `python3 -m tests.run_v9_walkforward`
 - **Check logs**: `journalctl -u trading_bot_v9_oneshot.service`
 - **Deploy**: `./deploy_v9_timer.sh`
 
+### Telegram Notifications (Ops)
+
+- **Env loading**: systemd services must load `/home/trader/trading_system/.env` via `EnvironmentFile` for `TELEGRAM_BOT_TOKEN` and `TELEGRAM_CHAT_ID`.
+- **Test**: `cd trading_system && set -a; source .env; set +a; python3 -m tests.test_telegram_health`
+- **Credential management**: Token and chat_id must not be committed to repo. Store only in local `.env` (gitignored).
+
 ---
 
 ## V9.1 Live Validation Plan
