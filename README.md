@@ -375,6 +375,17 @@ journalctl -u trading_bot_v9_oneshot.service -n 120 --no-pager | grep "V9 TRAILI
 grep -E "STOP_UPDATE|STOP_INIT" trading_system/logs/v9_trade_records.csv | tail -n 3
 ```
 
+**5) V9 trailing parity check** (live vs backtest formula consistency)
+
+```bash
+cd trading_system && python3 -m tests.check_v9_trailing_parity
+```
+
+- Output: `max_abs_diff`, `mismatch_count`, first 10 mismatches
+- Artifacts: `tests/reports/v9_trailing_parity_report.md`, `tests/reports/v9_trailing_parity_artifacts/trailing_parity.csv`
+- Data source: BTCUSDT 1D via `fetch_klines_df` (or cache at `tests/.cache/`). See `docs/v9/V9_TRAILING_PARITY.md`
+- **If mismatch**: Evidence first, then decide. Do not modify formulas without version bump. See parity doc for root cause analysis.
+
 ### Telegram Notifications (Ops)
 
 - **Env loading**: systemd services must load `/home/trader/trading_system/.env` via `EnvironmentFile` for `TELEGRAM_BOT_TOKEN` and `TELEGRAM_CHAT_ID`.
