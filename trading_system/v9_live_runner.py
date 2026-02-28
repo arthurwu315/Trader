@@ -131,9 +131,10 @@ def _fetch_full_snapshot() -> dict | None:
                     "orderId": o.get("orderId"),
                     "reduceOnly": o.get("reduceOnly"),
                     "workingType": o.get("workingType", "MARK_PRICE"),
+                    "type": t,
                 })
         stop_detail = "|".join(
-            f"{s['symbol']}:stopPrice={s['stopPrice']} orderId={s['orderId']} reduceOnly={s['reduceOnly']} workingType={s['workingType']}"
+            f"{s['symbol']}:orderId={s['orderId']} stopPrice={s['stopPrice']} type={s['type']} reduceOnly={s['reduceOnly']} workingType={s['workingType']}"
             for s in stop_orders
         ) or ""
         return {

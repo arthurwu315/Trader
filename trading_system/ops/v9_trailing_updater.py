@@ -159,12 +159,39 @@ def _append_stop_event(event_type: str, symbol: str, side: str, old_stop: float,
     )
 
 
+def _scan_all_stop_orders(client) -> dict[str, int]:
+    """Scan all open orders, return {symbol: count} of reduce-only STOP_MARKET/STOP."""
+    by_symbol: dict[str, int] = {}
+    try:
+        orders = client.get_open_orders(symbol=None)
+        for o in orders or []:
+            if not o.get("reduceOnly"):
+                continue
+            t = o.get("type", "")
+            if t in ("STOP_MARKET", "STOP"):
+                sym = o.get("symbol", "")
+                if sym:
+                    by_symbol[sym] = by_symbol.get(sym, 0) + 1
+    except Exception as e:
+        print(f"  [ERR] v9_trailing: scan open orders failed: {e}")
+    return by_symbol
+
+
 def _run_trailing_update(client, dry_run: bool, enabled: bool) -> int:
     """
-    For each open position: compute candidate stop, optionally update.
+    Always: scan open orders, print scanned_stop_orders log.
+    If positions exist and (dry_run or enabled): compute/update stops.
     Returns 0 on success, 1 on any API error (for RC to trigger ops notify).
     """
     do_update = enabled and not dry_run
+
+    by_symbol = _scan_all_stop_orders(client)
+    total = sum(by_symbol.values())
+    if by_symbol:
+        for sym, cnt in sorted(by_symbol.items()):
+            print(f"  [V9 TRAILING] scanned_stop_orders symbol={sym} count={cnt}")
+    else:
+        print(f"  [V9 TRAILING] scanned_stop_orders total=0")
 
     try:
         acc = client.futures_account()
@@ -172,6 +199,9 @@ def _run_trailing_update(client, dry_run: bool, enabled: bool) -> int:
     except Exception as e:
         print(f"  [ERR] v9_trailing: fetch account failed: {e}")
         return 1
+
+    if not (dry_run or do_update):
+        return 0
 
     rc = 0
     for p in positions:
@@ -251,12 +281,10 @@ def _run_trailing_update(client, dry_run: bool, enabled: bool) -> int:
 
 
 def run_trailing_updater() -> int:
-    """Entry point. Returns 0 ok, 1 error."""
+    """Entry point. Always scans stop orders (observability). Returns 0 ok, 1 error."""
     client = _get_client()
     if not client:
         return 0
     dry_run = os.getenv("V9_TRAILING_DRY_RUN", "0").strip() == "1"
     enabled = os.getenv("V9_TRAILING_UPDATE_ENABLED", "0").strip() == "1"
-    if not dry_run and not enabled:
-        return 0
     return _run_trailing_update(client, dry_run, enabled)

@@ -343,22 +343,35 @@ tail -n 50 trading_system/logs/v9_ops_order_test.log
 
 **`v9_ops_snapshot.csv` schema**: `timestamp,account_equity,available_balance,wallet_balance,current_notional,effective_leverage,position_count,open_orders_count,positions_detail,active_stop_orders_count,stop_orders_detail`
 
-**4) Trailing stop dry-run (no orders)**
+**4) Trailing updater verification**
+
+**a) No-position verification** (confirms scan runs; snapshot has stop columns)
+
+```bash
+cd trading_system && V9_LIVE_MODE=LIVE python3 -u -m v9_live_runner 2>&1 | grep -E "scanned_stop_orders|active_stop_orders_count|stop_orders_detail"
+tail -n 1 logs/v9_ops_snapshot.csv
+```
+
+Expected: `[V9 TRAILING] scanned_stop_orders total=0` (or per-symbol when stops exist); snapshot row contains `active_stop_orders_count,stop_orders_detail`.
+
+**b) Dry-run with positions** (no real orders; writes STOP_DRY_RUN)
 
 ```bash
 sudo systemctl set-environment V9_TRAILING_DRY_RUN=1
 sudo systemctl start trading_bot_v9_oneshot.service
 sudo systemctl unset-environment V9_TRAILING_DRY_RUN
-journalctl -u trading_bot_v9_oneshot.service -n 80 --no-pager
+journalctl -u trading_bot_v9_oneshot.service -n 80 --no-pager | grep -E "TRAILING|STOP_DRY"
+grep STOP_DRY_RUN trading_system/logs/v9_trade_records.csv | tail -n 3
 ```
 
-**5) Enable trailing stop updates (real stop modifications)**
+**c) Enable updates** (real stop modifications; writes STOP_INIT/STOP_UPDATE)
 
 ```bash
 sudo systemctl set-environment V9_TRAILING_UPDATE_ENABLED=1
 sudo systemctl start trading_bot_v9_oneshot.service
 sudo systemctl unset-environment V9_TRAILING_UPDATE_ENABLED
-journalctl -u trading_bot_v9_oneshot.service -n 80 --no-pager
+journalctl -u trading_bot_v9_oneshot.service -n 80 --no-pager | grep -E "TRAILING|STOP_"
+grep -E "STOP_UPDATE|STOP_INIT" trading_system/logs/v9_trade_records.csv | tail -n 3
 ```
 
 ### Telegram Notifications (Ops)
