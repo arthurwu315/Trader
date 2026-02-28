@@ -354,6 +354,16 @@ class TradingBotV3MicroMVP:
             
             # 計算名義價值和保證金
             notional = qty * signal.entry_price
+            # V9 Hard Cap: notional <= account_equity * 1.5 (effective leverage cap)
+            try:
+                from config_v9 import HARD_CAP_LEVERAGE
+                hard_cap_notional = account_equity * HARD_CAP_LEVERAGE
+                if notional > hard_cap_notional:
+                    notional = hard_cap_notional
+                    qty = notional / signal.entry_price
+                    logger.info(f"Hard cap applied: notional cropped to ${notional:.2f}")
+            except ImportError:
+                pass
             required_margin = notional / calculated_leverage * 1.05
             
             logger.info(f"計算結果:")

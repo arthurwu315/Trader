@@ -281,6 +281,26 @@ Run: `python3 -m tests.run_v84_robustness`
 
 Run: `python3 -m tests.run_v9_walkforward`
 
+### V9 Operational Freeze (12 Months)
+
+**Production Restart**: 2026-02-28  
+**Freeze start**: 2026-02-28  
+**Freeze end**: 2027-02-28  
+
+**不可修改項目**:
+- VOL_LOW, VOL_HIGH
+- regime filter
+- entry / exit 邏輯
+- trailing stop
+- ATR sizing
+- 原始倉位計算公式
+
+**資金結構**: 現貨 50% / 合約帳戶 equity 50%  
+**有效槓桿**: 1.5x (HARD_CAP_NOTIONAL = account_equity × 1.5)  
+**交易所槓桿**: 2x（上限）  
+**每季再平衡**: 維持 50/50  
+**變更政策**: 僅允許 bug fix，不允許邏輯修改
+
 ---
 
 ## V9.1 Live Validation Plan

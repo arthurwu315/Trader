@@ -9,3 +9,10 @@ STRATEGY_VERSION = "V9_REGIME_CORE"
 VOL_LOW = 2.2   # LOW: vol < 2.2%
 VOL_HIGH = 4.2  # HIGH: vol >= 4.2%
 # MID (2.2% <= vol < 4.2%): disabled, no new entries
+
+# Operational freeze (12 months from restart date)
+FREEZE_MODE = True
+FREEZE_UNTIL = "2027-02-28"  # 12 months from 2026-02-28
+
+# Hard cap: notional <= account_equity * 1.5 (effective leverage cap)
+HARD_CAP_LEVERAGE = 1.5

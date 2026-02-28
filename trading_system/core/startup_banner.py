@@ -22,16 +22,18 @@ def get_commit_hash() -> str:
 
 def print_startup_banner(mode: str = None):
     try:
-        from config_v9 import STRATEGY_VERSION, VOL_LOW, VOL_HIGH
+        from config_v9 import STRATEGY_VERSION, VOL_LOW, VOL_HIGH, FREEZE_MODE, FREEZE_UNTIL
     except ImportError:
         STRATEGY_VERSION = "V9_REGIME_CORE"
         VOL_LOW = 2.2
         VOL_HIGH = 4.2
+        FREEZE_MODE = True
+        FREEZE_UNTIL = "2027-02-28"
     m = mode if mode is not None else os.getenv("V9_LIVE_MODE", "LIVE")
     commit = get_commit_hash()
     msg = (
         f"STRATEGY_VERSION={STRATEGY_VERSION} VOL_LOW={VOL_LOW} VOL_HIGH={VOL_HIGH} "
-        f"MODE={m} GIT_COMMIT={commit}"
+        f"MODE={m} GIT_COMMIT={commit} FREEZE_MODE={FREEZE_MODE} FREEZE_UNTIL={FREEZE_UNTIL}"
     )
     print(msg)
     sys.stdout.flush()

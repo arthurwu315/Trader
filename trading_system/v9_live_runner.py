@@ -4,7 +4,7 @@ PAPER: simulated fills, log to v9_trade_records.
 MICRO-LIVE: real orders at 10% notional, log to v9_trade_records.
 
 Strategy: V9_REGIME_CORE (frozen). Execution layer only.
-Env: V9_LIVE_MODE=PAPER|MICRO-LIVE
+Env: V9_LIVE_MODE=PAPER|MICRO-LIVE|LIVE
 """
 from __future__ import annotations
 
@@ -13,23 +13,78 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
-# Ensure datetime imported for _write_health_check
-
 ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(ROOT))
 
-from config_v9 import STRATEGY_VERSION, VOL_LOW, VOL_HIGH
+from config_v9 import (
+    STRATEGY_VERSION,
+    VOL_LOW,
+    VOL_HIGH,
+    FREEZE_MODE,
+    FREEZE_UNTIL,
+    HARD_CAP_LEVERAGE,
+)
 
 
 def _get_mode() -> str:
     m = (os.getenv("V9_LIVE_MODE") or "PAPER").strip().upper()
-    return "MICRO-LIVE" if m == "MICRO-LIVE" else "PAPER"
+    if m == "MICRO-LIVE":
+        return "MICRO-LIVE"
+    if m == "LIVE":
+        return "LIVE"
+    return "PAPER"
+
+
+def _fetch_account_metrics() -> tuple[float, float, float]:
+    """Returns (account_equity, current_notional, effective_leverage)."""
+    try:
+        from dotenv import load_dotenv
+        load_dotenv(dotenv_path=ROOT / ".env", override=True)
+        api_key = os.getenv("BINANCE_API_KEY") or os.getenv("BINANCE_FUTURES_API_KEY")
+        api_secret = os.getenv("BINANCE_API_SECRET") or os.getenv("BINANCE_FUTURES_API_SECRET")
+        if not api_key or not api_secret:
+            return 0.0, 0.0, 0.0
+        from core.binance_client import BinanceFuturesClient
+        client = BinanceFuturesClient(
+            api_key=api_key,
+            api_secret=api_secret,
+            base_url=os.getenv("BINANCE_DATA_URL", "https://fapi.binance.com"),
+        )
+        acc = client.futures_account()
+        equity = float(acc.get("totalWalletBalance", 0) or 0)
+        positions = acc.get("positions", []) or []
+        notional = 0.0
+        for p in positions:
+            amt = float(p.get("positionAmt", 0) or 0)
+            if amt != 0:
+                mark = float(p.get("markPrice", 0) or 0)
+                notional += abs(amt * mark)
+        lev = notional / equity if equity > 0 else 0.0
+        return equity, notional, lev
+    except Exception:
+        return 0.0, 0.0, 0.0
 
 
 def _print_startup():
     mode = _get_mode()
     commit = _get_commit_hash()
-    line = f"STRATEGY_VERSION={STRATEGY_VERSION} VOL_LOW={VOL_LOW} VOL_HIGH={VOL_HIGH} MODE={mode} GIT_COMMIT={commit}"
+    equity, notional, lev = _fetch_account_metrics()
+    hard_cap = equity * HARD_CAP_LEVERAGE if equity > 0 else 0.0
+
+    lines = [
+        f"STRATEGY_VERSION={STRATEGY_VERSION}",
+        f"GIT_COMMIT={commit}",
+        f"MODE={mode}",
+        f"VOL_LOW={VOL_LOW}",
+        f"VOL_HIGH={VOL_HIGH}",
+        f"FREEZE_MODE={FREEZE_MODE}",
+        f"FREEZE_UNTIL={FREEZE_UNTIL}",
+        f"account_equity={equity:.2f}",
+        f"HARD_CAP_NOTIONAL={hard_cap:.2f}",
+        f"current_notional={notional:.2f}",
+        f"effective_leverage={lev:.4f}",
+    ]
+    line = " ".join(lines)
     print(line)
     _write_health_check(line)
 
@@ -130,7 +185,7 @@ def main():
     if mode == "PAPER":
         print("V9.1 PAPER mode: signal logging only (no real orders)")
     else:
-        print("V9.1 MICRO-LIVE mode: real orders at 10% notional")
+        print(f"V9.1 {mode} mode: real orders")
     print("Run tests/run_v9_live.py for full daily cycle (requires data fetch).")
 
 
