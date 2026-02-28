@@ -317,6 +317,12 @@ Run: `python3 -m tests.run_v9_walkforward`
 - **Test**: `cd trading_system && set -a; source .env; set +a; python3 -m tests.test_telegram_health`
 - **Credential management**: Token and chat_id must not be committed to repo. Store only in local `.env` (gitignored).
 
+### V9 Telegram Status Dashboard
+
+- Each hourly oneshot run sends a status dashboard to Telegram (STRATEGY_VERSION, GIT_COMMIT, account_equity, HARD_CAP_NOTIONAL, current_notional, effective_leverage, FREEZE_UNTIL, position count, execution time UTC+8).
+- If `TELEGRAM_BOT_TOKEN` or `TELEGRAM_CHAT_ID` is missing, a warning is logged and the runner does not crash.
+- **Test**: `python3 -m tests.test_telegram_health`
+
 ---
 
 ## V9.1 Live Validation Plan
