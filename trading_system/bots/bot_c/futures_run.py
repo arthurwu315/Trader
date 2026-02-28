@@ -2023,8 +2023,8 @@ def main():
     from bots.bot_c.config_c import get_strategy_c_config
     cfg = get_strategy_c_config()
     if not getattr(cfg, "enable_c_engine", False):
-        print("[DEPRECATED] C engine disabled (ENABLE_C_ENGINE=false). Use V8 A-only. Exiting.")
-        raise SystemExit(0)
+        print("C engine disabled (deprecated). ENABLE_C_ENGINE=false. Use V8 A-only (bots.bot_a.main_bot_a).")
+        sys.exit(1)
 
     print("Futures 實戰啟動：1D 宏觀組合引擎，每日 UTC 00:05~00:15 (UTC+8 08:05~08:15) 掃描一次")
     _ensure_runtime_files()

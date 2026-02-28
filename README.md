@@ -122,6 +122,7 @@ Status:
 **1. 封存 C 引擎**
 - 原因：Edge Test 在 2022-2024 無統計顯著（p-values 全 > 0.1）
 - 動作：`ENABLE_C_ENGINE=false`（預設），`config_c.enable_c_engine` 開關
+- 建議在 `.env` 新增 `ENABLE_C_ENGINE=false`（該檔不納版控）
 - futures_run 若被呼叫且 ENABLE_C_ENGINE=false 會立即退出
 
 **2. 停用舊 bot 自動重啟**
@@ -142,6 +143,31 @@ Status:
 | Baseline | Full | 8.3348 | 34.7510 | 0.2398 | 1.1294 | 47.69 | 65 | 47.93 |
 | V8_VolRegime | Full | 4.3086 | 37.8898 | 0.1137 | 1.0716 | 47.69 | 65 | 47.93 |
 
+### V8.1 (Experimental)
+
+**Governance fix:**
+- systemd ExecStart normalized to A-only bot (`bots.bot_a.main_bot_a`)
+- futures_run.py no longer exits with 0 when C disabled; uses `sys.exit(1)` and prints `C engine disabled (deprecated)` to prevent false "healthy" state
+
+**Strategy change:**
+- Vol regime sizing changed to "only de-risk in high vol"
+- multipliers: LOW=1.0, MID=1.0, HIGH=0.7 (no low-vol leverage)
+
+**Backtest (Full 2022-2024 + yearly)**
+
+| Period | Version | CAGR | MDD | Calmar | PF | Win% | Trades | Exposure |
+|--------|---------|------|-----|--------|-----|------|--------|----------|
+| Full | Baseline | 8.3348 | 34.7510 | 0.2398 | 1.1294 | 47.69 | 65 | 47.93 |
+| Full | V8.1 | 5.3312 | 37.0857 | 0.1438 | 1.0870 | 47.69 | 65 | 47.93 |
+| 2022 | Baseline | -2.4556 | 6.1105 | -0.4019 | 0.6132 | 33.33 | 3 | 6.58 |
+| 2022 | V8.1 | -2.8791 | 5.4553 | -0.5278 | 0.4862 | 33.33 | 3 | 6.58 |
+| 2023 | Baseline | 21.3615 | 10.2185 | 2.0905 | 1.4689 | 57.69 | 26 | 40.00 |
+| 2023 | V8.1 | 18.5763 | 10.4335 | 1.7804 | 1.4201 | 57.69 | 26 | 40.00 |
+| 2024 | Baseline | -0.4543 | 38.9282 | -0.0117 | 0.9950 | 41.67 | 36 | 54.64 |
+| 2024 | V8.1 | -4.0745 | 39.9283 | -0.1020 | 0.9511 | 41.67 | 36 | 54.64 |
+
+- **HighVolExposure%** (V8.1 Full): 35.41% — proportion of exposure hours in HIGH vol regime (vol≥4%)
+
 ---
 
 ## Engineering Policy (Hard Rule)
@@ -149,3 +175,4 @@ Status:
 1. **任何策略/參數/部署變更都必須更新 README.md**
 2. **必須 commit 並 git push 才算完成**
 3. **README 需包含**：變更目的、影響範圍、回測對照表、以及是否影響風控
+4. **任何 service/部署檔變更** 必須在 README 記錄「檔名 + 變更點 + 回滾方法」

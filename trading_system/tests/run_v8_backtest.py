@@ -2,7 +2,7 @@
 V8 Backtest: A-only + Volatility Regime Position Sizing
 - STRAT_A (1D macro) unchanged
 - vol = BTC 1d ATR(20)/Close * 100
-- LOW (<2%): mult=1.5, MID (2-4%): 1.0, HIGH (>=4%): 0.6
+- V8.1: LOW=1.0, MID=1.0, HIGH=0.7 (only de-risk in high vol)
 - Only sizing changes, no entry/exit modification
 """
 from __future__ import annotations
@@ -39,9 +39,9 @@ C_GROUP = [
 
 VOL_LOW = 2.0
 VOL_HIGH = 4.0
-MULT_LOW = 1.5
+MULT_LOW = 1.0
 MULT_MID = 1.0
-MULT_HIGH = 0.6
+MULT_HIGH = 0.7
 
 
 def to_utc_ts(x) -> pd.Timestamp:
@@ -170,6 +170,7 @@ def run_strat_a_with_sizing(data_map, btc_regime, vol_mult_map=None):
                 continue
             mult = vol_mult_map.get(ts, 1.0) if vol_mult_map is not None else 1.0
             mult = min(mult, 1.5)
+            is_high_vol = (vol_mult_map is not None and mult == MULT_HIGH)
             entry = float(row["close"])
             atr = float(row.get("atr_14", np.nan))
             if not np.isfinite(atr) or atr <= 0:
@@ -190,6 +191,7 @@ def run_strat_a_with_sizing(data_map, btc_regime, vol_mult_map=None):
                 "score": score,
                 "ret_net_pct": net_ret,
                 "pnl_usdt": pnl,
+                "is_high_vol": is_high_vol if vol_mult_map is not None else False,
             })
             i = exit_idx + 1
 
@@ -218,7 +220,7 @@ def run_strat_a_with_sizing(data_map, btc_regime, vol_mult_map=None):
 
 def compute_metrics(trades, days_override=None):
     if not trades:
-        return {"CAGR": 0, "MDD": 0, "Calmar": 0, "PF": 0, "Win%": 0, "Trades": 0, "Exposure": 0}
+        return {"CAGR": 0, "MDD": 0, "Calmar": 0, "PF": 0, "Win%": 0, "Trades": 0, "Exposure": 0, "HighVolExposure%": 0}
     eq = INITIAL_EQUITY
     curve = [eq]
     gp = gl = 0.0
@@ -248,7 +250,16 @@ def compute_metrics(trades, days_override=None):
     expo_h = sum((t["exit_time"] - t["entry_time"]).total_seconds() / 3600.0 for t in trades)
     total_h = max(days, 1) * 24.0
     expo = expo_h / total_h * 100.0 if total_h > 0 else 0.0
-    return {"CAGR": cagr, "MDD": max_dd_pct, "Calmar": calmar, "PF": pf, "Win%": win_pct, "Trades": len(trades), "Exposure": expo}
+    high_vol_expo_h = sum(
+        (t["exit_time"] - t["entry_time"]).total_seconds() / 3600.0
+        for t in trades if t.get("is_high_vol", False)
+    )
+    high_vol_expo_pct = (high_vol_expo_h / expo_h * 100.0) if expo_h > 0 else 0.0
+    return {
+        "CAGR": cagr, "MDD": max_dd_pct, "Calmar": calmar, "PF": pf,
+        "Win%": win_pct, "Trades": len(trades), "Exposure": expo,
+        "HighVolExposure%": high_vol_expo_pct,
+    }
 
 
 def filter_trades_by_year(trades, year):
@@ -295,19 +306,21 @@ async def main():
     vol_mult_map = build_btc_vol_mult_map(data_map)
 
     base_trades = run_strat_a_with_sizing(data_map, btc_regime, vol_mult_map=None)
-    v8_trades = run_strat_a_with_sizing(data_map, btc_regime, vol_mult_map=vol_mult_map)
+    v81_trades = run_strat_a_with_sizing(data_map, btc_regime, vol_mult_map=vol_mult_map)
 
-    print("| Version | Period | CAGR | MDD | Calmar | PF | Win% | Trades | Exposure |")
-    print("|---------|--------|------|-----|--------|-----|------|--------|----------|")
-    for name, trades in [("Baseline", base_trades), ("V8_VolRegime", v8_trades)]:
+    print("| Period | Version | CAGR | MDD | Calmar | PF | Win% | Trades | Exposure |")
+    print("|--------|---------|------|-----|--------|-----|------|--------|----------|")
+    for name, trades in [("Baseline", base_trades), ("V8.1", v81_trades)]:
         m = compute_metrics(trades)
-        print(f"| {name} | Full | {m['CAGR']:.4f} | {m['MDD']:.4f} | {m['Calmar']:.4f} | {m['PF']:.4f} | {m['Win%']:.4f} | {m['Trades']} | {m['Exposure']:.4f} |")
+        print(f"| Full | {name} | {m['CAGR']:.4f} | {m['MDD']:.4f} | {m['Calmar']:.4f} | {m['PF']:.4f} | {m['Win%']:.4f} | {m['Trades']} | {m['Exposure']:.4f} |")
     days_per_year = {2022: 365, 2023: 365, 2024: 366}
     for yr in (2022, 2023, 2024):
-        for name, trades in [("Baseline", base_trades), ("V8_VolRegime", v8_trades)]:
+        for name, trades in [("Baseline", base_trades), ("V8.1", v81_trades)]:
             ty = filter_trades_by_year(trades, yr)
             m = compute_metrics(ty, days_override=days_per_year.get(yr, 365))
-            print(f"| {name} | {yr} | {m['CAGR']:.4f} | {m['MDD']:.4f} | {m['Calmar']:.4f} | {m['PF']:.4f} | {m['Win%']:.4f} | {m['Trades']} | {m['Exposure']:.4f} |")
+            print(f"| {yr} | {name} | {m['CAGR']:.4f} | {m['MDD']:.4f} | {m['Calmar']:.4f} | {m['PF']:.4f} | {m['Win%']:.4f} | {m['Trades']} | {m['Exposure']:.4f} |")
+    m_v81 = compute_metrics(v81_trades)
+    print(f"\nHighVolExposure% (V8.1 Full): {m_v81.get('HighVolExposure%', 0):.2f}%")
 
 
 if __name__ == "__main__":
