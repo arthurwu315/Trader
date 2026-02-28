@@ -46,15 +46,19 @@
 | 下單邏輯 | `trading_system/core/execution_safety.py`（OrderStateMachine） |
 | 保護單 | `trading_system/core/protection_guard.py` |
 | 止損下單 | `ProtectionGuard.place_stop_loss()` → `_place_reduce_only_order()` |
+| Trailing 更新 | `trading_system/ops/v9_trailing_updater.py` |
 
 ### 2.2 行為描述
 
-- **止損型態**：STOP_MARKET（固定價觸發市價單）
+- **止損型態**：STOP_MARKET（reduce-only，closePosition）
 - **觸發價格來源**：`workingType = "MARK_PRICE"`（標記價格）
-- **Trailing 更新**：實盤端**無 trailing 更新邏輯**。止損在進場成交後掛出，之後不依市價或收盤價更新。
+- **Trailing 更新**：每小時 runner 執行時，依 backtest 公式計算 candidate_stop，若可**單調遞緊**則取消舊單並下新 STOP_MARKET。環境變數 `V9_TRAILING_UPDATE_ENABLED=1` 才實際更新；`V9_TRAILING_DRY_RUN=1` 僅計算與記錄。
 - **觸發判斷**：交易所依 **Mark Price** 是否觸及 `stopPrice` 來觸發 STOP_MARKET。
 
-因此：實盤為**固定止損**，以 Mark Price 觸發，無 trailing 行為。
+### 2.3 Behavioral Equivalence 與差異
+
+- **公式一致**：Live 使用與 backtest 相同之 `high - trail_mult*atr`（BUY）、`low + trail_mult*atr`（SELL），以及 HIGH_VOL_STOP_FACTOR。
+- **差異**：Live 無 bar high/low 觸發；僅依 Mark Price 觸及 stopPrice。日內觸及但未成交之情況與 backtest 模擬可能不同。
 
 ### 2.3 情境範例（實盤）
 
@@ -69,9 +73,9 @@
 
 | 項目 | 回測 | 實盤 |
 |------|------|------|
-| 更新頻率 | 每根日線 bar | 不更新（固定止損） |
+| 更新頻率 | 每根日線 bar | 每小時 runner（V9_TRAILING_UPDATE_ENABLED=1） |
 | 觸發價格 | Bar 的 high/low | Mark Price |
-| Trailing | 有（ATR-based） | 無 |
+| Trailing | 有（ATR-based） | 有（同公式，單調遞緊） |
 | 日內出場 | 可（模擬 intrabar 觸及） | 可（Mark Price 觸及即執行） |
 
 ---

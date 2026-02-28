@@ -341,7 +341,25 @@ tail -n 5 trading_system/logs/v9_ops_snapshot.csv
 tail -n 50 trading_system/logs/v9_ops_order_test.log
 ```
 
-**`v9_ops_snapshot.csv` schema**: `timestamp,account_equity,available_balance,wallet_balance,current_notional,effective_leverage,position_count,open_orders_count,positions_detail`
+**`v9_ops_snapshot.csv` schema**: `timestamp,account_equity,available_balance,wallet_balance,current_notional,effective_leverage,position_count,open_orders_count,positions_detail,active_stop_orders_count,stop_orders_detail`
+
+**4) Trailing stop dry-run (no orders)**
+
+```bash
+sudo systemctl set-environment V9_TRAILING_DRY_RUN=1
+sudo systemctl start trading_bot_v9_oneshot.service
+sudo systemctl unset-environment V9_TRAILING_DRY_RUN
+journalctl -u trading_bot_v9_oneshot.service -n 80 --no-pager
+```
+
+**5) Enable trailing stop updates (real stop modifications)**
+
+```bash
+sudo systemctl set-environment V9_TRAILING_UPDATE_ENABLED=1
+sudo systemctl start trading_bot_v9_oneshot.service
+sudo systemctl unset-environment V9_TRAILING_UPDATE_ENABLED
+journalctl -u trading_bot_v9_oneshot.service -n 80 --no-pager
+```
 
 ### Telegram Notifications (Ops)
 

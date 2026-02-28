@@ -6,6 +6,8 @@ MICRO-LIVE: real orders at 10% notional, log to v9_trade_records.
 Strategy: V9_REGIME_CORE (frozen). Execution layer only.
 Env: V9_LIVE_MODE=PAPER|MICRO-LIVE|LIVE
      V9_ORDER_CONNECTIVITY_TEST=1  (optional) run order connectivity test
+     V9_TRAILING_DRY_RUN=1         (optional) trailing: compute only, no orders
+     V9_TRAILING_UPDATE_ENABLED=1  (optional) trailing: actually update stops (default 0)
 No Telegram/dotenv side-effects (freeze). Notifications via ops/send_v9_dashboard.py.
 """
 from __future__ import annotations
@@ -31,7 +33,8 @@ from config_v9 import (
 # Ops snapshot CSV header (single line per run)
 V9_OPS_SNAPSHOT_HEADER = (
     "timestamp,account_equity,available_balance,wallet_balance,current_notional,"
-    "effective_leverage,position_count,open_orders_count,positions_detail"
+    "effective_leverage,position_count,open_orders_count,positions_detail,"
+    "active_stop_orders_count,stop_orders_detail"
 )
 
 
@@ -116,6 +119,23 @@ def _fetch_full_snapshot() -> dict | None:
             f"{d['symbol']}:{d['size']:.6g}@{d['entry_price']:.2f} upnl={d['unrealized_pnl']:.2f}"
             for d in pos_details
         ) or ""
+        stop_orders = []
+        for o in (open_orders or []):
+            if not o.get("reduceOnly"):
+                continue
+            t = o.get("type", "")
+            if t in ("STOP_MARKET", "STOP"):
+                stop_orders.append({
+                    "symbol": o.get("symbol", ""),
+                    "stopPrice": o.get("stopPrice"),
+                    "orderId": o.get("orderId"),
+                    "reduceOnly": o.get("reduceOnly"),
+                    "workingType": o.get("workingType", "MARK_PRICE"),
+                })
+        stop_detail = "|".join(
+            f"{s['symbol']}:stopPrice={s['stopPrice']} orderId={s['orderId']} reduceOnly={s['reduceOnly']} workingType={s['workingType']}"
+            for s in stop_orders
+        ) or ""
         return {
             "account_equity": equity,
             "available_balance": avail,
@@ -125,6 +145,8 @@ def _fetch_full_snapshot() -> dict | None:
             "position_count": position_count,
             "open_orders_count": open_orders_count,
             "positions_detail": positions_summary,
+            "active_stop_orders_count": len(stop_orders),
+            "stop_orders_detail": stop_detail,
         }
     except Exception:
         return None
@@ -142,9 +164,12 @@ def _write_ops_snapshot(snap: dict) -> None:
         f"  effective_leverage={snap['effective_leverage']:.4f}",
         f"  position_count={snap['position_count']}",
         f"  open_orders_count={snap['open_orders_count']}",
+        f"  active_stop_orders_count={snap.get('active_stop_orders_count', 0)}",
     ]
     if snap.get("positions_detail"):
         lines.append(f"  positions_detail={snap['positions_detail']}")
+    if snap.get("stop_orders_detail"):
+        lines.append(f"  stop_orders_detail={snap['stop_orders_detail']}")
     for line in lines:
         print(line)
     log_dir = ROOT / "logs"
@@ -155,11 +180,14 @@ def _write_ops_snapshot(snap: dict) -> None:
         with open(csv_path, "a", encoding="utf-8", newline="") as f:
             if not exists:
                 f.write(V9_OPS_SNAPSHOT_HEADER + "\n")
+            stop_cnt = snap.get("active_stop_orders_count", 0)
+            stop_det = (snap.get("stop_orders_detail") or "").replace(chr(34), "")
             f.write(
                 f"{ts},{snap['account_equity']:.2f},{snap['available_balance']:.2f},"
                 f"{snap['wallet_balance']:.2f},{snap['current_notional']:.2f},"
                 f"{snap['effective_leverage']:.6f},{snap['position_count']},"
-                f"{snap['open_orders_count']},\"{snap['positions_detail'].replace(chr(34), '')}\"\n"
+                f"{snap['open_orders_count']},\"{snap['positions_detail'].replace(chr(34), '')}\","
+                f"{stop_cnt},\"{stop_det}\"\n"
             )
     except Exception as e:
         print(f"  [WARN] v9_ops_snapshot.csv append failed: {e}")
@@ -367,6 +395,13 @@ def main():
         _run_order_connectivity_test()
     else:
         print("(Set V9_ORDER_CONNECTIVITY_TEST=1 to run order connectivity test)")
+
+    if mode in ("LIVE", "MICRO-LIVE"):
+        from ops.v9_trailing_updater import run_trailing_updater
+        trailing_rc = run_trailing_updater()
+        if trailing_rc != 0:
+            print("[V9] Trailing updater returned error, exiting 1")
+            sys.exit(1)
 
     print("Run tests/run_v9_live.py for full daily cycle (requires data fetch).")
 
