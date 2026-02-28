@@ -5,6 +5,7 @@ V8 Backtest: A-only + Volatility Regime
 - V8.1: LOW=1.0, MID=1.0, HIGH=0.7 (only de-risk in high vol)
 - V8.2: Revert sizing to 1.0; add high-vol conditional tighter stop (0.7x ATR trail)
 - V8.3: LOW mult=0.6 to suppress low-vol exposure; MID/HIGH=1.0; trailing stop baseline
+- V8.4: Block new entries when 2% <= vol < 4% (MID_VOL); only trade in LOW and HIGH
 """
 from __future__ import annotations
 
@@ -125,6 +126,23 @@ def build_btc_low_vol_set(data_map: dict) -> set:
     return s
 
 
+def build_btc_mid_vol_set(data_map: dict) -> set:
+    """Set of 'YYYY-MM-DD' date strings where 2% <= BTC vol < 4% (MID_VOL regime)."""
+    btc = data_map["BTCUSDT"]["1d"]
+    atr20 = btc["atr_20"].values
+    close = btc["close"].astype(float).values
+    ts_arr = btc["timestamp"].values
+    s = set()
+    for i in range(len(btc)):
+        if close[i] <= 0 or not np.isfinite(atr20[i]):
+            continue
+        vol_pct = atr20[i] / close[i] * 100.0
+        if VOL_LOW <= vol_pct < VOL_HIGH:
+            t = to_utc_ts(ts_arr[i])
+            s.add(t.strftime("%Y-%m-%d"))
+    return s
+
+
 def build_btc_high_vol_set(data_map: dict) -> set:
     """Set of 'YYYY-MM-DD' date strings where BTC vol >= 4% (HIGH_VOL regime)."""
     btc = data_map["BTCUSDT"]["1d"]
@@ -169,7 +187,8 @@ def _simulate_position_exit(df, side, entry_idx, entry_price, sl_price, trail_mu
     return end_idx, float(df.iloc[end_idx]["close"])
 
 
-def run_strat_a_with_sizing(data_map, btc_regime, vol_mult_map=None, high_vol_stop_set=None, high_vol_regime_set=None):
+def run_strat_a_with_sizing(data_map, btc_regime, vol_mult_map=None, high_vol_stop_set=None,
+                            high_vol_regime_set=None, mid_vol_block_set=None):
     def sig(row):
         c = float(row["close"])
         e50 = float(row.get("ema_50", np.nan))
@@ -207,6 +226,9 @@ def run_strat_a_with_sizing(data_map, btc_regime, vol_mult_map=None, high_vol_st
             rg = btc_regime.get(ts, "unknown")
             mult = vol_mult_map.get(ts_key, 1.0) if vol_mult_map is not None else 1.0
             if (rg == "bull" and side == "SELL") or (rg == "bear" and side == "BUY"):
+                i += 1
+                continue
+            if mid_vol_block_set is not None and ts_key in mid_vol_block_set:
                 i += 1
                 continue
             mult = min(mult, 1.5)
@@ -265,10 +287,12 @@ def run_strat_a_with_sizing(data_map, btc_regime, vol_mult_map=None, high_vol_st
     return accepted
 
 
-def compute_metrics(trades, days_override=None, high_vol_regime_set=None, low_vol_regime_set=None):
+def compute_metrics(trades, days_override=None, high_vol_regime_set=None, low_vol_regime_set=None,
+                    mid_vol_regime_set=None):
     empty = {"CAGR": 0, "MDD": 0, "Calmar": 0, "PF": 0, "Win%": 0, "Trades": 0, "Exposure": 0,
              "HighVolExposure%": 0, "HighVol MDD": 0, "non-HighVol MDD": 0,
-             "LowVolExposure%": 0, "LowVol MDD": 0, "non-LowVol MDD": 0}
+             "LowVolExposure%": 0, "LowVol MDD": 0, "non-LowVol MDD": 0,
+             "MidVolExposure%": 0, "MidVol MDD": 0}
     if not trades:
         return empty
     eq = INITIAL_EQUITY
@@ -363,6 +387,26 @@ def compute_metrics(trades, days_override=None, high_vol_regime_set=None, low_vo
     low_vol_mdd = _mdd_from_curve(curve_lv)
     non_low_vol_mdd = _mdd_from_curve(curve_nlv)
 
+    def _is_mid_vol(t):
+        if mid_vol_regime_set is not None:
+            d = pd.Timestamp(t["entry_time"]).strftime("%Y-%m-%d")
+            return d in mid_vol_regime_set
+        return False
+
+    mid_vol_expo_h = sum(
+        (t["exit_time"] - t["entry_time"]).total_seconds() / 3600.0
+        for t in trades if _is_mid_vol(t)
+    )
+    mid_vol_expo_pct = (mid_vol_expo_h / expo_h * 100.0) if expo_h > 0 else 0.0
+
+    eq_mv = INITIAL_EQUITY
+    curve_mv = [eq_mv]
+    for t in sorted(trades, key=lambda x: x["exit_time"]):
+        if _is_mid_vol(t):
+            eq_mv += t["pnl_usdt"]
+        curve_mv.append(eq_mv)
+    mid_vol_mdd = _mdd_from_curve(curve_mv)
+
     return {
         "CAGR": cagr, "MDD": max_dd_pct, "Calmar": calmar, "PF": pf,
         "Win%": win_pct, "Trades": len(trades), "Exposure": expo,
@@ -372,6 +416,8 @@ def compute_metrics(trades, days_override=None, high_vol_regime_set=None, low_vo
         "LowVolExposure%": low_vol_expo_pct,
         "LowVol MDD": low_vol_mdd,
         "non-LowVol MDD": non_low_vol_mdd,
+        "MidVolExposure%": mid_vol_expo_pct,
+        "MidVol MDD": mid_vol_mdd,
     }
 
 
@@ -417,37 +463,40 @@ async def main():
             btc_regime[ts] = "bull" if close > ema200 else "bear"
 
     low_vol_set = build_btc_low_vol_set(data_map)
-    vol_mult_v83 = build_btc_vol_mult_map(data_map, mult_low=0.6, mult_mid=1.0, mult_high=1.0)
+    mid_vol_set = build_btc_mid_vol_set(data_map)
+    high_vol_set = build_btc_high_vol_set(data_map)
 
     base_trades = run_strat_a_with_sizing(
         data_map, btc_regime, vol_mult_map=None,
-        high_vol_stop_set=None, high_vol_regime_set=None,
+        high_vol_stop_set=None, high_vol_regime_set=None, mid_vol_block_set=None,
     )
-    v83_trades = run_strat_a_with_sizing(
-        data_map, btc_regime, vol_mult_map=vol_mult_v83,
-        high_vol_stop_set=None, high_vol_regime_set=None,
+    v84_trades = run_strat_a_with_sizing(
+        data_map, btc_regime, vol_mult_map=None,
+        high_vol_stop_set=None, high_vol_regime_set=None, mid_vol_block_set=mid_vol_set,
     )
 
     print("| Period | Version | CAGR | MDD | Calmar | PF | Win% | Trades | Exposure |")
     print("|--------|---------|------|-----|--------|-----|------|--------|----------|")
     def _m(trades, do=None):
-        return compute_metrics(trades, days_override=do, low_vol_regime_set=low_vol_set)
+        return compute_metrics(trades, days_override=do,
+                              low_vol_regime_set=low_vol_set, mid_vol_regime_set=mid_vol_set,
+                              high_vol_regime_set=high_vol_set)
 
-    for name, trades in [("Baseline", base_trades), ("V8.3", v83_trades)]:
+    for name, trades in [("Baseline", base_trades), ("V8.4", v84_trades)]:
         m = _m(trades)
         print(f"| Full | {name} | {m['CAGR']:.4f} | {m['MDD']:.4f} | {m['Calmar']:.4f} | {m['PF']:.4f} | {m['Win%']:.4f} | {m['Trades']} | {m['Exposure']:.4f} |")
     days_per_year = {2022: 365, 2023: 365, 2024: 366}
     for yr in (2022, 2023, 2024):
-        for name, trades in [("Baseline", base_trades), ("V8.3", v83_trades)]:
+        for name, trades in [("Baseline", base_trades), ("V8.4", v84_trades)]:
             ty = filter_trades_by_year(trades, yr)
             m = _m(ty, do=days_per_year.get(yr, 365))
             print(f"| {yr} | {name} | {m['CAGR']:.4f} | {m['MDD']:.4f} | {m['Calmar']:.4f} | {m['PF']:.4f} | {m['Win%']:.4f} | {m['Trades']} | {m['Exposure']:.4f} |")
 
-    n_lv = sum(1 for t in base_trades if pd.Timestamp(t["entry_time"]).strftime("%Y-%m-%d") in low_vol_set)
-    print(f"\nLow-vol regime days: {len(low_vol_set)} | Baseline low-vol trades: {n_lv}")
-    for name, trades in [("Baseline", base_trades), ("V8.3", v83_trades)]:
+    for name, trades in [("Baseline", base_trades), ("V8.4", v84_trades)]:
         m = _m(trades)
-        print(f"{name} Full: LowVol Exposure% = {m.get('LowVolExposure%', 0):.2f}% | LowVol MDD = {m.get('LowVol MDD', 0):.4f}% | non-LowVol MDD = {m.get('non-LowVol MDD', 0):.4f}%")
+        print(f"\n{name} Full: HighVol Exposure% = {m.get('HighVolExposure%', 0):.2f}% | "
+              f"MidVol Exposure% = {m.get('MidVolExposure%', 0):.2f}% | LowVol Exposure% = {m.get('LowVolExposure%', 0):.2f}%")
+        print(f"  MidVol MDD = {m.get('MidVol MDD', 0):.4f}% | HighVol MDD = {m.get('HighVol MDD', 0):.4f}%")
 
 
 if __name__ == "__main__":
