@@ -357,6 +357,15 @@ tail -n 50 trading_system/logs/v9_ops_order_test.log
 - **Manual trigger**: `sudo systemctl start trading_bot_v9_oneshot.service` or `python3 ops/send_v9_dashboard.py` (after runner has written health_check).
 - **Test**: `python3 -m tests.test_telegram_health`
 
+### V9 Telegram Ops Interface
+
+- **Read-only** command bot. Commands: `/status` `/positions` `/equity` `/help`.
+- **Independent of V9 runner** — runs as separate service, does not affect strategy execution.
+- Data source: `logs/v9_ops_snapshot.csv` (prefer) or account API fetch.
+- **No trading** — only reads; cannot trigger orders or modify positions.
+- Deploy: `sudo cp systemd/v9_telegram_ops.service /etc/systemd/system/ && sudo systemctl daemon-reload && sudo systemctl enable --now v9_telegram_ops`
+- Service allows `Restart=always` (not part of strategy freeze).
+
 ---
 
 ## V9.1 Live Validation Plan

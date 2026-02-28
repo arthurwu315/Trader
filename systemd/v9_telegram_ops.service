@@ -1,0 +1,14 @@
+[Unit]
+Description=V9 Telegram Ops Bot (read-only commands)
+After=network-online.target
+
+[Service]
+Type=simple
+User=trader
+WorkingDirectory=/home/trader/trading_system
+EnvironmentFile=-/home/trader/trading_system/.env
+ExecStart=/usr/bin/python3 -u -m bots.telegram_ops_bot
+Restart=always
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
