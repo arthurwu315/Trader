@@ -311,14 +311,14 @@ def _run_order_connectivity_test() -> bool:
         if snap:
             _log(f"  account_equity={snap['account_equity']:.2f} position_count={snap['position_count']}")
         _log("Sending test order (POST /fapi/v1/order/test - no execution)...")
-        # Binance test endpoint validates request without executing
+        # Binance test endpoint validates request without executing. Notional must be >= 100.
         client.place_order_test({
             "symbol": "BTCUSDT",
             "side": "BUY",
             "type": "LIMIT",
             "timeInForce": "GTX",  # Post-only
-            "quantity": "0.001",
-            "price": "1000",  # Far from market, will never fill
+            "quantity": "0.002",
+            "price": "50000",  # Far from market, will never fill; notional=100
         })
         _log("PASS: Order connectivity test succeeded")
         try:
