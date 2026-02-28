@@ -349,12 +349,20 @@ tail -n 50 trading_system/logs/v9_ops_order_test.log
 - **Test**: `cd trading_system && set -a; source .env; set +a; python3 -m tests.test_telegram_health`
 - **Credential management**: Token and chat_id must not be committed to repo. Store only in local `.env` (gitignored).
 
+### Telegram Notifications Policy
+
+- **Heartbeat disabled** — no hourly status spam.
+- **Notify on error/kill only** — Telegram sent only when runner exits non-zero (exception, API error, order failure, kill switch).
+- **Optional trade notification** — when actual entry/exit occurs (future; currently not wired).
+- **Optional daily summary** — default off. Set `V9_DAILY_SUMMARY_ENABLED=1` in `.env`, then enable `v9_telegram_daily.timer` for 08:05 UTC+8.
+- **Telegram ops bot** (`/status`) — separate service, `Restart=always` (ops only, not strategy freeze).
+
 ### V9 Telegram Status Dashboard
 
 - **Freeze principle**: V9 runner does not send Telegram directly (no dotenv/telegram side-effects).
-- **External notifier**: `ops/send_v9_dashboard.py` reads `logs/v9_health_check.txt` and sends the status dashboard.
-- The hourly oneshot runs `ops/run_v9_hourly.sh` (1. v9_live_runner, 2. send_v9_dashboard.py). Step 2 failure does not affect step 1 exit code.
-- **Manual trigger**: `sudo systemctl start trading_bot_v9_oneshot.service` or `python3 ops/send_v9_dashboard.py` (after runner has written health_check).
+- **External notifier**: `ops/send_v9_dashboard.py` — modes: `--error` (on runner failure), `--daily` (daily summary, opt-in), `--force` (manual).
+- The hourly oneshot runs `ops/run_v9_hourly.sh` (1. v9_live_runner, 2. send_v9_dashboard **only when RC≠0**).
+- **Manual trigger**: `python3 ops/send_v9_dashboard.py --force` (after runner has written health_check).
 - **Test**: `python3 -m tests.test_telegram_health`
 
 ### V9 Telegram Ops Interface

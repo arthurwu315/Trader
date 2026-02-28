@@ -1,0 +1,12 @@
+[Unit]
+Description=V9 Daily Summary at 08:05 (UTC+8) - disabled by default
+# Enable: set V9_DAILY_SUMMARY_ENABLED=1 in .env, then:
+#   sudo systemctl enable v9_telegram_daily.timer
+#   sudo systemctl start v9_telegram_daily.timer
+
+[Timer]
+OnCalendar=*-*-* 00:05:00
+Persistent=true
+
+[Install]
+WantedBy=timers.target

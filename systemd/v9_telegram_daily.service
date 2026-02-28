@@ -1,0 +1,13 @@
+[Unit]
+Description=V9 Daily Summary (optional, set V9_DAILY_SUMMARY_ENABLED=1)
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=trader
+WorkingDirectory=/home/trader/trading_system
+EnvironmentFile=-/home/trader/trading_system/.env
+# Set V9_DAILY_SUMMARY_ENABLED=1 in .env to enable
+ExecStart=/usr/bin/python3 -u /home/trader/ops/send_v9_dashboard.py --daily
+StandardOutput=journal
+StandardError=journal
