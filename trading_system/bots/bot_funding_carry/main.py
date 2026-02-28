@@ -1,6 +1,7 @@
 """
 Alpha2 Funding Carry - main loop.
 PAPER: log signals only. MICRO-LIVE: 2-5% notional (after PAPER 7d).
+Every cycle writes CYCLE records (one per symbol) for observability.
 """
 from __future__ import annotations
 
@@ -30,8 +31,8 @@ def _get_funding_rate(client, symbol: str) -> float:
 
 
 def run_cycle_paper(client=None):
-    """One PAPER cycle: check funding, log signals, append trade records."""
-    from core.v9_trade_record import append_v9_trade_record
+    """One PAPER cycle: check funding, always write CYCLE per symbol, TRADE when signal."""
+    from core.v9_trade_record import append_v9_trade_record, append_funding_carry_cycle
     mode = os.getenv("ALPHA2_MODE", "PAPER")
     now = datetime.now(timezone.utc)
     ts = now.strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -49,16 +50,37 @@ def run_cycle_paper(client=None):
     for symbol in UNIVERSE:
         fr = _get_funding_rate(client, symbol)
         annual = fr * 3 * 365
-        if annual >= ENTRY_ANNUALIZED_MIN:  # entry: >20% annualized
-            # Long spot + short perp = receive funding when positive
-            # Record as "entry" for funding carry
+        annual_pct = annual * 100
+
+        # Determine signal and reason
+        if annual >= ENTRY_ANNUALIZED_MIN:
+            signal, reason = True, "ENTRY_SIGNAL"
+        elif annual < EXIT_ANNUALIZED_MAX or annual < 0:
+            signal, reason = True, "EXIT_SIGNAL"
+        else:
+            signal, reason = False, "NO_SIGNAL"
+
+        # Always write CYCLE record (observability)
+        append_funding_carry_cycle(
+            timestamp=ts,
+            symbol=symbol,
+            mode=mode,
+            funding_rate_8h=fr,
+            funding_annualized_pct=annual_pct,
+            signal=signal,
+            reason=reason,
+            strategy_id=STRATEGY_ID,
+        )
+
+        # TRADE record only when signal
+        if annual >= ENTRY_ANNUALIZED_MIN:
             append_v9_trade_record(
                 timestamp=ts,
                 symbol=symbol,
-                side="SHORT_PERP",  # hedge = long spot not tracked here
-                price=0.0,  # placeholder for PAPER
+                side="SHORT_PERP",
+                price=0.0,
                 qty=0.0,
-                regime_vol=annual * 100,
+                regime_vol=annual_pct,
                 reason="entry",
                 fees=0.0,
                 slippage_est=0.0,
@@ -66,15 +88,16 @@ def run_cycle_paper(client=None):
                 order_time=ts,
                 mode=mode,
                 strategy_id=STRATEGY_ID,
+                event_type="TRADE",
             )
-        elif annual < EXIT_ANNUALIZED_MAX or annual < 0:  # exit: <10% or negative
+        elif annual < EXIT_ANNUALIZED_MAX or annual < 0:
             append_v9_trade_record(
                 timestamp=ts,
                 symbol=symbol,
                 side="CLOSE",
                 price=0.0,
                 qty=0.0,
-                regime_vol=annual * 100,
+                regime_vol=annual_pct,
                 reason="exit",
                 fees=0.0,
                 slippage_est=0.0,
@@ -82,6 +105,7 @@ def run_cycle_paper(client=None):
                 order_time=ts,
                 mode=mode,
                 strategy_id=STRATEGY_ID,
+                event_type="TRADE",
             )
     return 0
 

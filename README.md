@@ -341,9 +341,30 @@ Run: `python3 -m tests.run_v9_walkforward`
 - **Entry**: funding_rate_8h annualized &gt; 20%
 - **Exit**: annualized &lt; 10% or negative, or single-asset loss &gt; 1%
 - **Risk**: Alpha2 capital cap 10% of total; single asset 2–3%; MICRO-LIVE 2–5% notional first
-- **Report**: `python3 -m tests.run_funding_carry_report` — funding collected, hedge pnl, costs, max adverse excursion
 - **Deploy**: PAPER 7 days first → MICRO-LIVE 2–5%
-- **Start PAPER**: `ALPHA2_MODE=PAPER python3 -m bots.bot_funding_carry.main`
+- **Start PAPER**: `python3 -m bots.bot_funding_carry.main`
+
+**Observability (PAPER)**
+
+- Every cycle writes **CYCLE** records (one per symbol) to `logs/v9_trade_records.csv` (strategy_id=FUND_CARRY_V1)
+- CYCLE fields: timestamp_utc, symbol, mode(PAPER), funding_rate_8h, funding_annualized_pct, signal(boolean), reason(NO_SIGNAL / ENTRY_SIGNAL / EXIT_SIGNAL)
+- When entry/exit signal: additional **TRADE** record (event_type=TRADE)
+
+**Trade record format (extended for Alpha2)**
+
+| Field | Description |
+|-------|-------------|
+| event_type | CYCLE \| TRADE |
+| funding_rate_8h | 8h funding rate (CYCLE only) |
+| funding_annualized_pct | Annualized % (CYCLE only) |
+| signal | true/false (CYCLE only) |
+| reason | NO_SIGNAL \| ENTRY_SIGNAL \| EXIT_SIGNAL (CYCLE); entry/exit (TRADE) |
+
+**Report**: `python3 -m tests.run_funding_carry_report`
+
+- With 0 TRADE events: outputs "Trades: 0" + latest funding snapshot (annualized %) + signal count (last 7 days)
+- With trades: funding collected proxy, fees, slippage
+- Diagnostic: when no FUND_CARRY_V1 records, prints file path, row count, strategy_id distribution
 
 ---
 

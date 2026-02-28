@@ -1,18 +1,28 @@
 """
 V9.1 Trade record format (PAPER & MICRO-LIVE share same schema).
+Extended for Alpha2 CYCLE records: event_type, funding_rate_8h, funding_annualized_pct, signal.
 """
+import csv
 import json
 from pathlib import Path
 from datetime import datetime, timezone
+
+# Project root: trading_system/
+_PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
 V9_TRADE_RECORD_HEADER = (
     "timestamp,symbol,side,price,qty,regime_vol,reason,fees,slippage_est,"
     "signal_time,order_time,mode,strategy_id"
 )
+V9_TRADE_RECORD_HEADER_EXTENDED = (
+    V9_TRADE_RECORD_HEADER
+    + ",event_type,funding_rate_8h,funding_annualized_pct,signal"
+)
 
 
-def ensure_log_dir():
-    log_dir = Path(__file__).resolve().parents[1] / "logs"
+def ensure_log_dir() -> Path:
+    """Ensure logs dir exists. Uses project root (absolute path)."""
+    log_dir = _PROJECT_ROOT / "logs"
     log_dir.mkdir(parents=True, exist_ok=True)
     return log_dir
 
@@ -23,6 +33,48 @@ def get_v9_records_path() -> Path:
 
 def get_v9_records_json_path() -> Path:
     return ensure_log_dir() / "v9_trade_records.jsonl"
+
+
+def _ensure_extended_header(csv_path: Path) -> None:
+    """If file exists with old header, migrate to extended header."""
+    if not csv_path.exists():
+        return
+    try:
+        with open(csv_path, "r", encoding="utf-8") as f:
+            first = f.readline().strip()
+        if "event_type" in first:
+            return
+        # Migrate: read all rows, rewrite with extended header
+        with open(csv_path, "r", encoding="utf-8") as f:
+            reader = csv.DictReader(f)
+            rows = list(reader)
+        ext_fieldnames = [
+            "timestamp", "symbol", "side", "price", "qty", "regime_vol", "reason",
+            "fees", "slippage_est", "signal_time", "order_time", "mode", "strategy_id",
+            "event_type", "funding_rate_8h", "funding_annualized_pct", "signal",
+        ]
+        with open(csv_path, "w", encoding="utf-8", newline="") as f:
+            f.write(V9_TRADE_RECORD_HEADER_EXTENDED + "\n")
+            w = csv.DictWriter(f, fieldnames=ext_fieldnames, extrasaction="ignore")
+            for r in rows:
+                r.setdefault("event_type", "")
+                r.setdefault("funding_rate_8h", "")
+                r.setdefault("funding_annualized_pct", "")
+                r.setdefault("signal", "")
+                w.writerow(r)
+    except Exception:
+        pass
+
+
+def _ensure_header_and_extended(csv_path: Path, use_extended: bool = False) -> None:
+    """Ensure file exists with correct header. Migrate if needed for extended."""
+    if csv_path.exists():
+        if use_extended:
+            _ensure_extended_header(csv_path)
+        return
+    with open(csv_path, "w", encoding="utf-8", newline="") as f:
+        hdr = V9_TRADE_RECORD_HEADER_EXTENDED if use_extended else V9_TRADE_RECORD_HEADER
+        f.write(hdr + "\n")
 
 
 def append_v9_trade_record(
@@ -39,11 +91,17 @@ def append_v9_trade_record(
     order_time: str = "",
     mode: str = "PAPER",
     strategy_id: str = "V9_REGIME_CORE",
+    event_type: str = "",
+    funding_rate_8h: str = "",
+    funding_annualized_pct: str = "",
+    signal: str = "",
 ):
-    """Append one trade record to CSV and JSONL."""
+    """Append one trade record to CSV and JSONL. Extended fields for Alpha2 CYCLE."""
     log_dir = ensure_log_dir()
     csv_path = log_dir / "v9_trade_records.csv"
     json_path = log_dir / "v9_trade_records.jsonl"
+
+    _ensure_header_and_extended(csv_path, use_extended=True)
 
     row = {
         "timestamp": timestamp,
@@ -59,16 +117,18 @@ def append_v9_trade_record(
         "order_time": order_time,
         "mode": mode,
         "strategy_id": strategy_id,
+        "event_type": event_type or "",
+        "funding_rate_8h": funding_rate_8h or "",
+        "funding_annualized_pct": funding_annualized_pct or "",
+        "signal": signal or "",
     }
 
-    write_header = not csv_path.exists()
     try:
         with open(csv_path, "a", encoding="utf-8", newline="") as f:
-            if write_header:
-                f.write(V9_TRADE_RECORD_HEADER + "\n")
             f.write(
                 f"{timestamp},{symbol},{side},{price:.8f},{qty:.8f},{regime_vol:.4f},{reason},"
-                f"{fees:.4f},{slippage_est:.4f},{signal_time},{order_time},{mode},{strategy_id}\n"
+                f"{fees:.4f},{slippage_est:.4f},{signal_time},{order_time},{mode},{strategy_id},"
+                f"{event_type or ''},{funding_rate_8h or ''},{funding_annualized_pct or ''},{signal or ''}\n"
             )
     except Exception as e:
         print(f"  [WARN] append_v9_trade_record CSV: {e}")
@@ -78,6 +138,27 @@ def append_v9_trade_record(
             f.write(json.dumps(row, ensure_ascii=False) + "\n")
     except Exception as e:
         print(f"  [WARN] append_v9_trade_record JSONL: {e}")
+
+
+def append_funding_carry_cycle(
+    timestamp: str,
+    symbol: str,
+    mode: str,
+    funding_rate_8h: float,
+    funding_annualized_pct: float,
+    signal: bool,
+    reason: str,
+    strategy_id: str = "FUND_CARRY_V1",
+) -> None:
+    """Append Alpha2 CYCLE record. Always called every PAPER cycle per symbol."""
+    csv_path = get_v9_records_path()
+    _ensure_header_and_extended(csv_path, use_extended=True)
+    with open(csv_path, "a", encoding="utf-8", newline="") as f:
+        f.write(
+            f"{timestamp},{symbol},CYCLE,0,0,{funding_annualized_pct:.4f},{reason},"
+            f"0,0,{timestamp},{timestamp},{mode},{strategy_id},"
+            f"CYCLE,{funding_rate_8h:.8f},{funding_annualized_pct:.2f},{str(signal).lower()}\n"
+        )
 
 
 def read_v9_records(csv_path: Path = None):
