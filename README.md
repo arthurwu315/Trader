@@ -353,7 +353,7 @@ journalctl -u trading_bot_v9_oneshot.service -n 120 --no-pager | grep "V9 TRAILI
 tail -n 3 /home/trader/trading_system/logs/v9_ops_snapshot.csv
 ```
 
-Expected: `[V9 TRAILING] scan_stop_orders count=0` (or count>0); snapshot row has `active_stop_orders_count` and `stop_orders_detail` (JSON, or `[]` when none).
+Expected: journal has `[V9 TRAILING] scanned_stop_orders total=<N>` and snapshot row has `active_stop_orders_count` + `stop_orders_detail` (JSON, or `[]` when none).
 
 **b) Dry-run with positions** (when positions exist; no real orders; writes STOP_DRY_RUN)
 
@@ -364,6 +364,10 @@ sudo systemctl unset-environment V9_TRAILING_DRY_RUN
 journalctl -u trading_bot_v9_oneshot.service -n 120 --no-pager | grep "V9 TRAILING"
 grep STOP_DRY_RUN trading_system/logs/v9_trade_records.csv | tail -n 3
 ```
+
+Expected log includes:
+- `[V9 TRAILING] <SYM> side=<BUY/SELL> extrema=<...> atr14=<...> candidate=<...> current_stop=<...> decision=<SKIP/INIT/UPDATE>`
+- `[V9 TRAILING DRY-RUN] ...`
 
 **c) Enable updates** (real stop modifications; writes STOP_INIT/STOP_UPDATE)
 
@@ -385,6 +389,16 @@ cd trading_system && python3 -m tests.check_v9_trailing_parity
 - Artifacts: `tests/reports/v9_trailing_parity_report.md`, `tests/reports/v9_trailing_parity_artifacts/trailing_parity.csv`
 - Data source: BTCUSDT 1D via `fetch_klines_df` (or cache at `tests/.cache/`). See `docs/v9/V9_TRAILING_PARITY.md`
 - **If mismatch**: Evidence first, then decide. Do not modify formulas without version bump. See parity doc for root cause analysis.
+
+**6) V9 trailing parity check v2** (since-entry extrema parity)
+
+```bash
+cd trading_system && python3 -m tests.check_v9_trailing_parity_v2
+```
+
+- Output: `mismatch_count`, `max_abs_diff`
+- Artifacts: `tests/reports/v9_trailing_parity_v2_report.md`, `tests/reports/v9_trailing_parity_v2_artifacts/trailing_parity_v2.csv`
+- Principle when mismatch: **evidence first, then correction** (no silent parameter/logic drift)
 
 ### Telegram Notifications (Ops)
 

@@ -48,17 +48,26 @@
 | 止損下單 | `ProtectionGuard.place_stop_loss()` → `_place_reduce_only_order()` |
 | Trailing 更新 | `trading_system/ops/v9_trailing_updater.py` |
 
-### 2.2 行為描述
+### 2.2 行為描述（Live v2）
 
 - **止損型態**：STOP_MARKET（reduce-only，closePosition）
 - **觸發價格來源**：`workingType = "MARK_PRICE"`（標記價格）
 - **Trailing 更新**：每小時 runner 執行時，依 backtest 公式計算 candidate_stop，若可**單調遞緊**則取消舊單並下新 STOP_MARKET。環境變數 `V9_TRAILING_UPDATE_ENABLED=1` 才實際更新；`V9_TRAILING_DRY_RUN=1` 僅計算與記錄。
+- **Extrema state（v2）**：live 端新增 `logs/v9_trailing_state.json`，按 symbol 記錄進場後極值：
+  - LONG：`max_high_since_entry`
+  - SHORT：`min_low_since_entry`
+- **Candidate（v2）**：
+  - BUY：`max_high_since_entry - effective_trail * atr14_today`
+  - SELL：`min_low_since_entry + effective_trail * atr14_today`
+- **High-vol 判定（v2）**：使用 BTC 1D `ATR20 (SMA)` 與 `VOL_HIGH=4.2`（freeze 值）：
+  - `vol_pct = atr20 / close * 100`
+  - `vol_pct >= 4.2` 時套用 `HIGH_VOL_STOP_FACTOR`
 - **觸發判斷**：交易所依 **Mark Price** 是否觸及 `stopPrice` 來觸發 STOP_MARKET。
 
-### 2.3 Behavioral Equivalence 與差異
+### 2.3 Behavioral Equivalence 與差異（v2）
 
-- **公式一致**：Live 使用與 backtest 相同之 `high - trail_mult*atr`（BUY）、`low + trail_mult*atr`（SELL），以及 HIGH_VOL_STOP_FACTOR。
-- **差異**：Live 無 bar high/low 觸發；僅依 Mark Price 觸及 stopPrice。日內觸及但未成交之情況與 backtest 模擬可能不同。
+- **公式一致**：Live v2 以 since-entry extrema 重建 bar-by-bar trailing 路徑，candidate 與 backtest trailing 運算對齊。
+- **仍存在差異**：Live 無 bar high/low 觸發；實際觸發依 Mark Price。日內觸及但未成交之情況與 backtest 模擬可能不同。
 
 ### 2.3 情境範例（實盤）
 
@@ -80,7 +89,15 @@
 
 ---
 
-## 4. 備註
+## 4. 驗證
+
+- 舊版 parity（single-bar candidate）：`python3 -m tests.check_v9_trailing_parity`
+- 新版 parity（extrema v2）：`python3 -m tests.check_v9_trailing_parity_v2`
+- v2 產物：
+  - `tests/reports/v9_trailing_parity_v2_report.md`
+  - `tests/reports/v9_trailing_parity_v2_artifacts/trailing_parity_v2.csv`
+
+## 5. 備註
 
 - `config_a.py` 中有 `enable_trailing_stop: bool = False`，與上述實盤行為一致。
 - 本文件僅描述現有程式邏輯，未改變任何策略參數或邏輯。

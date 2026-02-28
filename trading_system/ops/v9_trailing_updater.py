@@ -6,6 +6,7 @@ Only tightens; never loosens.
 """
 from __future__ import annotations
 
+import json
 import os
 import sys
 from datetime import datetime, timezone
@@ -13,6 +14,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
+STATE_PATH = ROOT / "logs" / "v9_trailing_state.json"
 
 # V9 backtest params (from run_v8_backtest - do not change)
 TRAIL_MULT = 2.5
@@ -69,12 +71,27 @@ def _compute_atr_14(bars: list[dict]) -> float:
     return atr
 
 
+def _compute_atr_20(bars: list[dict]) -> float:
+    """Compute ATR(20) from OHLC bars. Returns 0 if insufficient data."""
+    if len(bars) < 21:
+        return 0.0
+    trs = []
+    for i in range(1, len(bars)):
+        h = bars[i]["high"]
+        l = bars[i]["low"]
+        prev_c = bars[i - 1]["close"]
+        tr = max(h - l, abs(h - prev_c), abs(l - prev_c))
+        trs.append(tr)
+    atr = sum(trs[-20:]) / 20 if len(trs) >= 20 else 0.0
+    return atr
+
+
 def _is_high_vol_btc(client) -> bool:
     """Check if BTC is in high-vol regime (vol >= VOL_HIGH)."""
-    bars = _fetch_1d_ohlc(client, "BTCUSDT", limit=25)
+    bars = _fetch_1d_ohlc(client, "BTCUSDT", limit=60)
     if len(bars) < 21:
         return False
-    atr20 = _compute_atr_14(bars[-21:])  # approximate ATR20
+    atr20 = _compute_atr_20(bars)
     if atr20 <= 0:
         return False
     close = bars[-1]["close"]
@@ -131,6 +148,116 @@ def _compute_candidate_stop(client, symbol: str, side: str, entry_price: float) 
     if side == "BUY":
         return high - effective_trail * atr
     return low + effective_trail * atr
+
+
+def _load_state() -> dict:
+    if not STATE_PATH.exists():
+        return {}
+    try:
+        with open(STATE_PATH, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+
+def _save_state(state: dict) -> None:
+    try:
+        STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
+        with open(STATE_PATH, "w", encoding="utf-8") as f:
+            json.dump(state, f, ensure_ascii=True, separators=(",", ":"))
+    except Exception as e:
+        print(f"  [WARN] v9_trailing: save state failed: {e}")
+
+
+def _day_start_ms(ts_ms: int) -> int:
+    day_sec = 86400
+    return (int(ts_ms) // (day_sec * 1000)) * day_sec * 1000
+
+
+def _utc_day_start_now_ms() -> int:
+    now = datetime.now(timezone.utc)
+    return int(now.replace(hour=0, minute=0, second=0, microsecond=0).timestamp() * 1000)
+
+
+def _build_extrema_from_bars(bars: list[dict], side: str, entry_day_ms: int, include_today: bool) -> tuple[float | None, int | None]:
+    """
+    Build extrema from entry day to last closed day.
+    include_today=False => up to yesterday close.
+    include_today=True  => include latest available daily bar.
+    """
+    if not bars:
+        return None, None
+    cutoff = _utc_day_start_now_ms()
+    filtered = []
+    for b in bars:
+        ts = int(b.get("timestamp", 0) or 0)
+        if ts <= 0 or ts < entry_day_ms:
+            continue
+        if not include_today and ts >= cutoff:
+            continue
+        filtered.append(b)
+    if not filtered:
+        return None, None
+    if side == "BUY":
+        extrema = max(float(b["high"]) for b in filtered)
+    else:
+        extrema = min(float(b["low"]) for b in filtered)
+    last_ts = int(filtered[-1].get("timestamp", 0) or 0)
+    return extrema, last_ts
+
+
+def _ensure_symbol_state(state: dict, symbol: str, side: str, entry_day_ms: int, entry_price: float, bars: list[dict]) -> dict:
+    cur = state.get(symbol)
+    if (
+        not isinstance(cur, dict)
+        or cur.get("side") != side
+        or int(cur.get("entry_day", -1)) != int(entry_day_ms)
+        or abs(float(cur.get("entry_price", 0.0) or 0.0) - float(entry_price)) > max(1e-8, entry_price * 1e-8)
+    ):
+        extrema, last_ts = _build_extrema_from_bars(bars, side, entry_day_ms, include_today=False)
+        cur = {
+            "entry_day": int(entry_day_ms),
+            "side": side,
+            "entry_price": float(entry_price),
+            "max_high_since_entry": float(extrema) if (extrema is not None and side == "BUY") else None,
+            "min_low_since_entry": float(extrema) if (extrema is not None and side == "SELL") else None,
+            "last_bar_ts": int(last_ts) if last_ts else 0,
+        }
+        state[symbol] = cur
+    return cur
+
+
+def _update_symbol_extrema(cur: dict, side: str, entry_day_ms: int, bars: list[dict]) -> tuple[float | None, int]:
+    extrema_key = "max_high_since_entry" if side == "BUY" else "min_low_since_entry"
+    extrema = cur.get(extrema_key)
+    last_bar_ts = int(cur.get("last_bar_ts", 0) or 0)
+    cutoff = _utc_day_start_now_ms()
+    for b in bars:
+        ts = int(b.get("timestamp", 0) or 0)
+        if ts <= 0 or ts <= last_bar_ts or ts < entry_day_ms or ts >= cutoff:
+            continue
+        px = float(b["high"]) if side == "BUY" else float(b["low"])
+        if extrema is None:
+            extrema = px
+        elif side == "BUY":
+            extrema = max(float(extrema), px)
+        else:
+            extrema = min(float(extrema), px)
+        last_bar_ts = ts
+    cur[extrema_key] = float(extrema) if extrema is not None else None
+    cur["last_bar_ts"] = last_bar_ts
+    return (float(extrema) if extrema is not None else None), last_bar_ts
+
+
+def _candidate_from_extrema(side: str, extrema: float | None, atr14: float, entry_price: float, effective_trail: float) -> float | None:
+    if extrema is None:
+        return None
+    if atr14 <= 0:
+        atr14 = entry_price * 0.015
+    if side == "BUY":
+        return float(extrema) - effective_trail * atr14
+    return float(extrema) + effective_trail * atr14
 
 
 def _get_tick_size(client, symbol: str) -> float:
@@ -201,6 +328,7 @@ def scan_stop_orders_for_snapshot(client) -> list[dict]:
     except Exception as e:
         print(f"  [ERR] v9_trailing: scan open orders failed: {e}")
     n = len(stop_list)
+    print(f"  [V9 TRAILING] scanned_stop_orders total={n}")
     print(f"  [V9 TRAILING] scan_stop_orders count={n}")
     if n > 0:
         for s in stop_list:
@@ -217,6 +345,8 @@ def _run_trailing_update(client, dry_run: bool, enabled: bool) -> int:
     do_update = enabled and not dry_run
 
     by_symbol = _scan_all_stop_orders(client)
+    total_scanned = sum(by_symbol.values())
+    print(f"  [V9 TRAILING] scanned_stop_orders total={total_scanned}")
 
     try:
         acc = client.futures_account()
@@ -224,6 +354,21 @@ def _run_trailing_update(client, dry_run: bool, enabled: bool) -> int:
     except Exception as e:
         print(f"  [ERR] v9_trailing: fetch account failed: {e}")
         return 1
+
+    state = _load_state()
+    open_symbols = set()
+
+    # Clean up state for closed positions before optional early-return.
+    for p in positions:
+        amt = float(p.get("positionAmt", 0) or 0)
+        if amt != 0:
+            sym = str(p.get("symbol", "") or "")
+            if sym:
+                open_symbols.add(sym)
+    for sym in list(state.keys()):
+        if sym not in open_symbols:
+            state.pop(sym, None)
+    _save_state(state)
 
     if not (dry_run or do_update):
         return 0
@@ -237,10 +382,16 @@ def _run_trailing_update(client, dry_run: bool, enabled: bool) -> int:
         entry = float(p.get("entryPrice", 0) or 0)
         side = "BUY" if amt > 0 else "SELL"
         close_side = "SELL" if amt > 0 else "BUY"
+        entry_ts_raw = int(p.get("updateTime", 0) or 0)
+        if entry_ts_raw <= 0:
+            entry_day_ms = _utc_day_start_now_ms()
+        else:
+            entry_day_ms = _day_start_ms(entry_ts_raw)
 
         sl_order = _scan_sl_order(client, symbol)
         current_stop = float(sl_order["stopPrice"]) if sl_order else None
         is_init = current_stop is None
+        decision = "SKIP"
         if is_init:
             bars = _fetch_1d_ohlc(client, symbol, limit=25)
             atr = _compute_atr_14(bars) if len(bars) >= 15 else entry * 0.015
@@ -249,8 +400,24 @@ def _run_trailing_update(client, dry_run: bool, enabled: bool) -> int:
             initial_sl = entry - SL_MULT * atr if side == "BUY" else entry + SL_MULT * atr
             current_stop = initial_sl
 
-        candidate = _compute_candidate_stop(client, symbol, side, entry)
+        bars = _fetch_1d_ohlc(client, symbol, limit=400)
+        if len(bars) < 15:
+            print(f"  [V9 TRAILING] {symbol} side={side} extrema=na atr14=na candidate=na current_stop={current_stop:.4f} decision=SKIP")
+            continue
+
+        st = _ensure_symbol_state(state, symbol, side, entry_day_ms, entry, bars)
+        extrema, _ = _update_symbol_extrema(st, side, entry_day_ms, bars)
+        atr14 = _compute_atr_14(bars)
+        if atr14 <= 0:
+            atr14 = entry * 0.015
+        effective_trail = TRAIL_MULT * HIGH_VOL_STOP_FACTOR if _is_high_vol_btc(client) else TRAIL_MULT
+        candidate = _candidate_from_extrema(side, extrema, atr14, entry, effective_trail)
         if candidate is None:
+            extrema_txt = "na"
+            print(
+                f"  [V9 TRAILING] {symbol} side={side} extrema={extrema_txt} atr14={atr14:.4f} "
+                f"candidate=na current_stop={current_stop:.4f} decision=SKIP"
+            )
             continue
 
         tick = _get_tick_size(client, symbol)
@@ -270,11 +437,25 @@ def _run_trailing_update(client, dry_run: bool, enabled: bool) -> int:
             else:
                 stop_to_place = min(candidate_r, _round_price(initial_sl, tick))
             should_update = True
+            decision = "INIT"
         else:
             stop_to_place = candidate_r
 
         if not should_update:
+            extrema_txt = f"{extrema:.4f}" if extrema is not None else "na"
+            print(
+                f"  [V9 TRAILING] {symbol} side={side} extrema={extrema_txt} atr14={atr14:.4f} "
+                f"candidate={candidate_r:.4f} current_stop={current_r:.4f} decision=SKIP"
+            )
             continue
+
+        if decision != "INIT":
+            decision = "UPDATE"
+        extrema_txt = f"{extrema:.4f}" if extrema is not None else "na"
+        print(
+            f"  [V9 TRAILING] {symbol} side={side} extrema={extrema_txt} atr14={atr14:.4f} "
+            f"candidate={candidate_r:.4f} current_stop={current_r:.4f} decision={decision}"
+        )
 
         if dry_run:
             print(f"  [V9 TRAILING DRY-RUN] {symbol} {side}: old_stop={current_r:.4f} new_stop={stop_to_place:.4f} (would {'init' if is_init else 'update'})")
@@ -302,6 +483,7 @@ def _run_trailing_update(client, dry_run: bool, enabled: bool) -> int:
         except Exception as e:
             print(f"  [ERR] v9_trailing {symbol}: {e}")
             rc = 1
+    _save_state(state)
     return rc
 
 
