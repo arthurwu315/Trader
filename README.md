@@ -345,22 +345,23 @@ tail -n 50 trading_system/logs/v9_ops_order_test.log
 
 **4) Trailing updater verification**
 
-**a) No-position verification** (confirms scan runs; snapshot has stop columns)
+**a) No-position verification** (confirms scan log + snapshot stop_orders_detail)
 
 ```bash
-cd trading_system && V9_LIVE_MODE=LIVE python3 -u -m v9_live_runner 2>&1 | grep -E "scanned_stop_orders|active_stop_orders_count|stop_orders_detail"
-tail -n 1 logs/v9_ops_snapshot.csv
+sudo systemctl start trading_bot_v9_oneshot.service
+journalctl -u trading_bot_v9_oneshot.service -n 120 --no-pager | grep "V9 TRAILING"
+tail -n 3 /home/trader/trading_system/logs/v9_ops_snapshot.csv
 ```
 
-Expected: `[V9 TRAILING] scanned_stop_orders total=0` (or per-symbol when stops exist); snapshot row contains `active_stop_orders_count,stop_orders_detail`.
+Expected: `[V9 TRAILING] scan_stop_orders count=0` (or count>0); snapshot row has `active_stop_orders_count` and `stop_orders_detail` (JSON, or `[]` when none).
 
-**b) Dry-run with positions** (no real orders; writes STOP_DRY_RUN)
+**b) Dry-run with positions** (when positions exist; no real orders; writes STOP_DRY_RUN)
 
 ```bash
 sudo systemctl set-environment V9_TRAILING_DRY_RUN=1
 sudo systemctl start trading_bot_v9_oneshot.service
 sudo systemctl unset-environment V9_TRAILING_DRY_RUN
-journalctl -u trading_bot_v9_oneshot.service -n 80 --no-pager | grep -E "TRAILING|STOP_DRY"
+journalctl -u trading_bot_v9_oneshot.service -n 120 --no-pager | grep "V9 TRAILING"
 grep STOP_DRY_RUN trading_system/logs/v9_trade_records.csv | tail -n 3
 ```
 
@@ -370,7 +371,7 @@ grep STOP_DRY_RUN trading_system/logs/v9_trade_records.csv | tail -n 3
 sudo systemctl set-environment V9_TRAILING_UPDATE_ENABLED=1
 sudo systemctl start trading_bot_v9_oneshot.service
 sudo systemctl unset-environment V9_TRAILING_UPDATE_ENABLED
-journalctl -u trading_bot_v9_oneshot.service -n 80 --no-pager | grep -E "TRAILING|STOP_"
+journalctl -u trading_bot_v9_oneshot.service -n 120 --no-pager | grep "V9 TRAILING"
 grep -E "STOP_UPDATE|STOP_INIT" trading_system/logs/v9_trade_records.csv | tail -n 3
 ```
 

@@ -13,6 +13,7 @@ No Telegram/dotenv side-effects (freeze). Notifications via ops/send_v9_dashboar
 from __future__ import annotations
 
 import csv
+import json
 import os
 import sys
 from datetime import datetime, timezone
@@ -119,24 +120,7 @@ def _fetch_full_snapshot() -> dict | None:
             f"{d['symbol']}:{d['size']:.6g}@{d['entry_price']:.2f} upnl={d['unrealized_pnl']:.2f}"
             for d in pos_details
         ) or ""
-        stop_orders = []
-        for o in (open_orders or []):
-            if not o.get("reduceOnly"):
-                continue
-            t = o.get("type", "")
-            if t in ("STOP_MARKET", "STOP"):
-                stop_orders.append({
-                    "symbol": o.get("symbol", ""),
-                    "stopPrice": o.get("stopPrice"),
-                    "orderId": o.get("orderId"),
-                    "reduceOnly": o.get("reduceOnly"),
-                    "workingType": o.get("workingType", "MARK_PRICE"),
-                    "type": t,
-                })
-        stop_detail = "|".join(
-            f"{s['symbol']}:orderId={s['orderId']} stopPrice={s['stopPrice']} type={s['type']} reduceOnly={s['reduceOnly']} workingType={s['workingType']}"
-            for s in stop_orders
-        ) or ""
+        # stop_orders filled by scan_stop_orders_for_snapshot (called from main)
         return {
             "account_equity": equity,
             "available_balance": avail,
@@ -146,8 +130,8 @@ def _fetch_full_snapshot() -> dict | None:
             "position_count": position_count,
             "open_orders_count": open_orders_count,
             "positions_detail": positions_summary,
-            "active_stop_orders_count": len(stop_orders),
-            "stop_orders_detail": stop_detail,
+            "active_stop_orders_count": 0,
+            "stop_orders_detail": "[]",
         }
     except Exception:
         return None
@@ -169,8 +153,7 @@ def _write_ops_snapshot(snap: dict) -> None:
     ]
     if snap.get("positions_detail"):
         lines.append(f"  positions_detail={snap['positions_detail']}")
-    if snap.get("stop_orders_detail"):
-        lines.append(f"  stop_orders_detail={snap['stop_orders_detail']}")
+    lines.append(f"  stop_orders_detail={snap.get('stop_orders_detail', '[]')}")
     for line in lines:
         print(line)
     log_dir = ROOT / "logs"
@@ -182,7 +165,7 @@ def _write_ops_snapshot(snap: dict) -> None:
             if not exists:
                 f.write(V9_OPS_SNAPSHOT_HEADER + "\n")
             stop_cnt = snap.get("active_stop_orders_count", 0)
-            stop_det = (snap.get("stop_orders_detail") or "").replace(chr(34), "")
+            stop_det = (snap.get("stop_orders_detail") or "[]").replace('"', '""')
             f.write(
                 f"{ts},{snap['account_equity']:.2f},{snap['available_balance']:.2f},"
                 f"{snap['wallet_balance']:.2f},{snap['current_notional']:.2f},"
@@ -385,8 +368,15 @@ def main():
     else:
         print(f"V9.1 {mode} mode: real orders")
 
+    client = _get_client()
     snap = _fetch_full_snapshot()
-    if snap:
+    if snap and client:
+        from ops.v9_trailing_updater import scan_stop_orders_for_snapshot
+        stop_list = scan_stop_orders_for_snapshot(client)
+        snap["active_stop_orders_count"] = len(stop_list)
+        snap["stop_orders_detail"] = json.dumps(stop_list) if stop_list else "[]"
+        _write_ops_snapshot(snap)
+    elif snap:
         _write_ops_snapshot(snap)
     else:
         print("[V9 OPS SNAPSHOT] skipped (no API credentials or fetch failed)")

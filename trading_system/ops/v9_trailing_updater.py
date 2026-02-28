@@ -177,6 +177,37 @@ def _scan_all_stop_orders(client) -> dict[str, int]:
     return by_symbol
 
 
+def scan_stop_orders_for_snapshot(client) -> list[dict]:
+    """
+    Scan open orders for reduce-only STOP/STOP_MARKET. Print verifiable log.
+    Returns list of {symbol, stopPrice, orderId, type, workingType, reduceOnly} for snapshot.
+    """
+    stop_list: list[dict] = []
+    try:
+        orders = client.get_open_orders(symbol=None)
+        for o in orders or []:
+            if not o.get("reduceOnly"):
+                continue
+            t = o.get("type", "")
+            if t in ("STOP_MARKET", "STOP"):
+                stop_list.append({
+                    "symbol": str(o.get("symbol", "")),
+                    "stopPrice": o.get("stopPrice"),
+                    "orderId": o.get("orderId"),
+                    "type": t,
+                    "workingType": str(o.get("workingType", "MARK_PRICE")),
+                    "reduceOnly": o.get("reduceOnly"),
+                })
+    except Exception as e:
+        print(f"  [ERR] v9_trailing: scan open orders failed: {e}")
+    n = len(stop_list)
+    print(f"  [V9 TRAILING] scan_stop_orders count={n}")
+    if n > 0:
+        for s in stop_list:
+            print(f"    -> {s['symbol']} stopPrice={s['stopPrice']} type={s['type']} workingType={s['workingType']}")
+    return stop_list
+
+
 def _run_trailing_update(client, dry_run: bool, enabled: bool) -> int:
     """
     Always: scan open orders, print scanned_stop_orders log.
@@ -186,12 +217,6 @@ def _run_trailing_update(client, dry_run: bool, enabled: bool) -> int:
     do_update = enabled and not dry_run
 
     by_symbol = _scan_all_stop_orders(client)
-    total = sum(by_symbol.values())
-    if by_symbol:
-        for sym, cnt in sorted(by_symbol.items()):
-            print(f"  [V9 TRAILING] scanned_stop_orders symbol={sym} count={cnt}")
-    else:
-        print(f"  [V9 TRAILING] scanned_stop_orders total=0")
 
     try:
         acc = client.futures_account()
