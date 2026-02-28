@@ -191,6 +191,29 @@ Status:
 - **non-HighVol MDD** (equity curve from non-high-vol trades only): Baseline 43.01% | V8.2 42.97%
 - **Conclusion**: 0.7× trail in high vol increased HighVol MDD and overall MDD; single-variable experiment did not achieve goal.
 
+### V8.3 (Experimental)
+
+- Suppress low-vol regime exposure: LOW vol (vol<2%) multiplier = 0.6
+- MID / HIGH unchanged (1.0)
+- Trailing stop reverted to baseline
+
+**Backtest (Full 2022-2024 + yearly)**
+
+| Period | Version | CAGR | MDD | Calmar | PF | Win% | Trades | Exposure |
+|--------|---------|------|-----|--------|-----|------|--------|----------|
+| Full | Baseline | 8.3348 | 34.7510 | 0.2398 | 1.1294 | 47.69 | 65 | 47.93 |
+| Full | V8.3 | 8.3348 | 34.7510 | 0.2398 | 1.1294 | 47.69 | 65 | 47.93 |
+| 2022 | Baseline | -2.4556 | 6.1105 | -0.4019 | 0.6132 | 33.33 | 3 | 6.58 |
+| 2022 | V8.3 | -2.4556 | 6.1105 | -0.4019 | 0.6132 | 33.33 | 3 | 6.58 |
+| 2023 | Baseline | 21.3615 | 10.2185 | 2.0905 | 1.4689 | 57.69 | 26 | 40.00 |
+| 2023 | V8.3 | 21.3615 | 10.2185 | 2.0905 | 1.4689 | 57.69 | 26 | 40.00 |
+| 2024 | Baseline | -0.4543 | 38.9282 | -0.0117 | 0.9950 | 41.67 | 36 | 54.64 |
+| 2024 | V8.3 | -0.4543 | 38.9282 | -0.0117 | 0.9950 | 41.67 | 36 | 54.64 |
+
+- **LowVol Exposure%**: 0.00% (no trades occurred on low-vol days in 2022-2024)
+- **LowVol MDD / non-LowVol MDD**: 0.00% / 34.75% (Baseline & V8.3 identical)
+- **Note**: 18 low-vol days in sample; 0 trades coincided. Experiment structurally correct; no observable effect in this period.
+
 ---
 
 ## Engineering Policy (Hard Rule)
