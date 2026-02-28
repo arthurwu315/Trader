@@ -168,6 +168,29 @@ Status:
 
 - **HighVolExposure%** (V8.1 Full): 35.41% — proportion of exposure hours in HIGH vol regime (vol≥4%)
 
+### V8.2 (Experimental)
+
+- Reverted position multiplier to 1.0 (no sizing change)
+- Added volatility-conditional tighter stop: high vol regime (vol≥4%) uses 0.7× ATR stop distance
+- Goal: reduce drawdown in high-vol periods without reducing position size
+
+**Backtest (Full 2022-2024 + yearly)**
+
+| Period | Version | CAGR | MDD | Calmar | PF | Win% | Trades | Exposure |
+|--------|---------|------|-----|--------|-----|------|--------|----------|
+| Full | Baseline | 8.3348 | 34.7510 | 0.2398 | 1.1294 | 47.69 | 65 | 47.93 |
+| Full | V8.2 | -4.1221 | 50.9746 | -0.0809 | 0.9432 | 45.71 | 70 | 44.56 |
+| 2022 | Baseline | -2.4556 | 6.1105 | -0.4019 | 0.6132 | 33.33 | 3 | 6.58 |
+| 2022 | V8.2 | 1.5165 | 7.4620 | 0.2032 | 1.1853 | 33.33 | 3 | 1.10 |
+| 2023 | Baseline | 21.3615 | 10.2185 | 2.0905 | 1.4689 | 57.69 | 26 | 40.00 |
+| 2023 | V8.2 | 10.6868 | 11.0947 | 0.9632 | 1.2308 | 51.85 | 27 | 38.63 |
+| 2024 | Baseline | -0.4543 | 38.9282 | -0.0117 | 0.9950 | 41.67 | 36 | 54.64 |
+| 2024 | V8.2 | -20.6714 | 55.7757 | -0.3706 | 0.7833 | 42.50 | 40 | 54.37 |
+
+- **HighVol MDD** (equity curve from high-vol trades only): Baseline 11.12% | V8.2 23.09%
+- **non-HighVol MDD** (equity curve from non-high-vol trades only): Baseline 43.01% | V8.2 42.97%
+- **Conclusion**: 0.7× trail in high vol increased HighVol MDD and overall MDD; single-variable experiment did not achieve goal.
+
 ---
 
 ## Engineering Policy (Hard Rule)
