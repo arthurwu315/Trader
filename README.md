@@ -112,3 +112,40 @@ t-test vs Random:
 Status:
 - C Engine statistical edge not confirmed.
 - Further parameter tuning halted.
+
+---
+
+## Version & Decision Log
+
+### V8 Governance (2025-02)
+
+**1. 封存 C 引擎**
+- 原因：Edge Test 在 2022-2024 無統計顯著（p-values 全 > 0.1）
+- 動作：`ENABLE_C_ENGINE=false`（預設），`config_c.enable_c_engine` 開關
+- futures_run 若被呼叫且 ENABLE_C_ENGINE=false 會立即退出
+
+**2. 停用舊 bot 自動重啟**
+- 檔案：`trading_system/trading_bot.service`
+- 變更：`Restart=always` → `Restart=no`
+- 指令：`sudo systemctl disable --now trading_bot.service`（若已安裝）
+
+**3. 新版本 V8**
+- 設計：A-only + Volatility Regime Position Sizing
+- 服務：`ExecStart` 改為 `bots.bot_a.main_bot_a`
+- Vol regime：BTC 1d ATR20/Close*100 → LOW(<2%): mult=1.5, MID(2-4%): 1.0, HIGH(>=4%): 0.6
+- 回測：`python3 -m tests.run_v8_backtest`
+
+**V8 回測對照 (Full 2022-2024)**
+
+| Version | Period | CAGR | MDD | Calmar | PF | Win% | Trades | Exposure |
+|---------|--------|------|-----|--------|-----|------|--------|----------|
+| Baseline | Full | 8.3348 | 34.7510 | 0.2398 | 1.1294 | 47.69 | 65 | 47.93 |
+| V8_VolRegime | Full | 4.3086 | 37.8898 | 0.1137 | 1.0716 | 47.69 | 65 | 47.93 |
+
+---
+
+## Engineering Policy (Hard Rule)
+
+1. **任何策略/參數/部署變更都必須更新 README.md**
+2. **必須 commit 並 git push 才算完成**
+3. **README 需包含**：變更目的、影響範圍、回測對照表、以及是否影響風控

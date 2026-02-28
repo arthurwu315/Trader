@@ -1,5 +1,5 @@
 [Unit]
-Description=BNB/USDT Futures Testnet (futures_run.py)
+Description=V8 A-only Trading Bot (1D macro + vol regime sizing)
 After=network-online.target
 Wants=network-online.target
 
@@ -7,13 +7,13 @@ Wants=network-online.target
 Type=simple
 User=trader
 WorkingDirectory=/home/trader/trading_system
-ExecStart=/usr/bin/python3 -u -m bots.bot_c.futures_run
-Restart=always
+ExecStart=/usr/bin/python3 -u -m bots.bot_a.main_bot_a
+Restart=no
 RestartSec=30
 StandardOutput=journal
 StandardError=journal
 
-# 避免記憶體不足時頻繁重啟
+# V8: C engine deprecated. No auto-restart per governance.
 Environment=PYTHONUNBUFFERED=1
 
 [Install]

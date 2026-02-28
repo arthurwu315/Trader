@@ -13,6 +13,7 @@ class ConfigStrategyC:
     """策略C配置 - 高報酬版"""
     
     # ==================== 基本 ====================
+    enable_c_engine: bool = (os.getenv("ENABLE_C_ENGINE", "false").lower() in ("1", "true", "yes"))
     strategy_id: str = "C"
     strategy_version: str = "C-UNIFIED-V1.1"
     strategy_tag: str = "STRATEGY_C"
