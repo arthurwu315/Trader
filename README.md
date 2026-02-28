@@ -343,6 +343,30 @@ Run: `python3 -m tests.run_v9_walkforward`
 - **Risk**: Alpha2 capital cap 10% of total; single asset 2–3%; MICRO-LIVE 2–5% notional first
 - **Deploy**: PAPER 7 days first → MICRO-LIVE 2–5%
 - **Start PAPER**: `python3 -m bots.bot_funding_carry.main`
+- **Alpha2 and V9 are fully independent**: separate service, separate kill switch, no shared logic
+
+**Independent service** (`trading_bot_alpha2.service`)
+
+- File: `trading_system/trading_bot_alpha2.service`
+- `Restart=no` (no auto restart)
+- `Environment=ALPHA2_LIVE_MODE=MICRO-LIVE`
+- `ExecStart=/usr/bin/python3 -u -m bots.bot_funding_carry.main`
+- Install: `sudo cp trading_bot_alpha2.service /etc/systemd/system/ && sudo systemctl daemon-reload`
+- Start: `sudo systemctl start trading_bot_alpha2`
+- Rollback: `sudo systemctl stop trading_bot_alpha2`; deploy previous commit via `./deploy_alpha2.sh <hash>`
+
+**Alpha2 kill switch (independent of V9)**
+
+- **ALPHA2_MAX_DD_PCT = 1%** (equity drawdown from alpha2_equity_peak)
+- Tracks `alpha2_equity_peak` in `logs/alpha2_equity_peak.json`
+- If DD &gt; 1% → stop bot (SystemExit), write `event_type=KILL`, `reason=ALPHA2_DD_LIMIT`
+- Manual DD simulation: set `logs/alpha2_equity_peak.json` to high value, then `ALPHA2_SIMULATE_DD=1 ALPHA2_LIVE_MODE=MICRO-LIVE python3 -m bots.bot_funding_carry.main`
+
+**Deploy** (`deploy_alpha2.sh`)
+
+- Usage: `./deploy_alpha2.sh <commit_hash>`
+- Locks commit, records to `logs/deploy_alpha2_hash.txt`
+- No auto restart
 
 **Observability (PAPER)**
 

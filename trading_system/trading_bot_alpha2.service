@@ -1,0 +1,21 @@
+[Unit]
+Description=Alpha2 Funding Carry Bot (MICRO-LIVE) - Independent of V9
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=trader
+WorkingDirectory=/home/trader/trading_system
+Environment=ALPHA2_LIVE_MODE=MICRO-LIVE
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/usr/bin/python3 -u -m bots.bot_funding_carry.main
+Restart=no
+RestartSec=30
+StandardOutput=journal
+StandardError=journal
+
+# Alpha2: Independent service, no auto restart. V9 service unchanged.
+
+[Install]
+WantedBy=multi-user.target

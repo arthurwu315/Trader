@@ -26,6 +26,7 @@ from bots.bot_funding_carry.config import (
     ALPHA2_CAPITAL_PCT,
     SINGLE_ASSET_CAP_PCT,
     PAPER_SIMULATED_EQUITY,
+    ALPHA2_MAX_DD_PCT,
 )
 from bots.bot_funding_carry.state import (
     is_in_cooldown,
@@ -34,6 +35,8 @@ from bots.bot_funding_carry.state import (
     inc_rebalance_fail,
     get_state_summary,
     get_cooldown_active,
+    get_equity_peak,
+    update_equity_peak,
 )
 
 
@@ -54,15 +57,69 @@ def _get_mark_price(client, symbol: str) -> float | None:
         return None
 
 
-def _print_startup_banner():
-    """Print hard stop status, cooldown symbols, self-test mode."""
+def _get_futures_equity(client) -> float | None:
+    """Fetch total wallet balance from Binance Futures. Returns None on error."""
+    try:
+        out = client._call_with_retry("GET", "/fapi/v2/account", {})
+        wb = out.get("totalWalletBalance")
+        return float(wb) if wb is not None else None
+    except Exception:
+        return None
+
+
+def _check_alpha2_dd_kill(client, mode: str) -> None:
+    """MICRO-LIVE only: check equity DD vs peak. If DD > ALPHA2_MAX_DD_PCT, write KILL and exit."""
+    if mode != "MICRO-LIVE":
+        return
+    if os.getenv("ALPHA2_SIMULATE_DD", "").strip() in ("1", "true", "yes"):
+        peak = get_equity_peak()
+        if peak is not None and peak > 0:
+            current = peak * (1 - ALPHA2_MAX_DD_PCT - 0.001)
+        else:
+            return
+    else:
+        current = _get_futures_equity(client)
+        if current is None or current <= 0:
+            return
+        update_equity_peak(current)
+        peak = get_equity_peak()
+        if peak is None or peak <= 0:
+            return
+    dd_pct = (peak - current) / peak
+    if dd_pct > ALPHA2_MAX_DD_PCT:
+        from core.v9_trade_record import append_v9_trade_record
+        ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        append_v9_trade_record(
+            timestamp=ts,
+            symbol="ALPHA2",
+            side="KILL",
+            price=current,
+            qty=0.0,
+            regime_vol=dd_pct * 100,
+            reason="ALPHA2_DD_LIMIT",
+            fees=0.0,
+            slippage_est=0.0,
+            signal_time=ts,
+            order_time=ts,
+            mode=mode,
+            strategy_id=STRATEGY_ID,
+            event_type="KILL",
+        )
+        print(f"ALPHA2 DD KILL: drawdown {dd_pct*100:.2f}% > {ALPHA2_MAX_DD_PCT*100}% (peak={peak:.2f}, current={current:.2f})")
+        raise SystemExit(1)
+
+
+def _print_startup_banner(mode: str):
+    """Print mode, hard stop status, cooldown symbols, equity peak, self-test."""
     summary = get_state_summary()
     cooldowns = get_cooldown_active()
     self_test = os.getenv("ALPHA2_SELF_TEST", "").strip() in ("1", "true", "yes")
+    peak = get_equity_peak()
     lines = [
-        f"Alpha2 {STRATEGY_ID} PAPER",
+        f"Alpha2 {STRATEGY_ID} {mode}",
         f"  hard_stop_triggered: {summary['hard_stop_triggered']} | rebalance_fail: {summary['rebalance_fail_count']} | consecutive_out: {summary['consecutive_out_of_threshold']}",
         f"  cooldown: {[(s, u) for s, u in cooldowns] if cooldowns else 'none'}",
+        (f"  alpha2_equity_peak: {peak:.2f}" if peak is not None else "  alpha2_equity_peak: (not set)"),
     ]
     if self_test:
         lines.append("  ALPHA2_SELF_TEST=1 (simulate deviation -> rebalance fail -> hard stop)")
@@ -70,18 +127,12 @@ def _print_startup_banner():
 
 
 def run_cycle_paper(client=None):
-    """One PAPER cycle: check funding, cooldown, compute/NA notional, self-test optional."""
+    """One cycle: check funding, cooldown, compute/NA notional. MICRO-LIVE: equity DD kill."""
     from core.v9_trade_record import append_v9_trade_record, append_funding_carry_cycle
-    mode = os.getenv("ALPHA2_MODE", "PAPER")
+    mode = os.getenv("ALPHA2_LIVE_MODE") or os.getenv("ALPHA2_MODE", "PAPER")
     self_test = os.getenv("ALPHA2_SELF_TEST", "").strip() in ("1", "true", "yes")
     now = datetime.now(timezone.utc)
     ts = now.strftime("%Y-%m-%dT%H:%M:%SZ")
-
-    _print_startup_banner()
-
-    if should_hard_stop(REBALANCE_FAIL_HARD_STOP):
-        print("ALPHA2 HARD STOP: rebalance fail or consecutive out-of-threshold >= 3")
-        sys.exit(1)
 
     if client is None:
         from bots.bot_c.config_c import get_strategy_c_config
@@ -92,6 +143,15 @@ def run_cycle_paper(client=None):
             api_key=cfg.binance_api_key or "dummy",
             api_secret=cfg.binance_api_secret or "dummy",
         )
+
+    _print_startup_banner(mode)
+
+    if mode == "MICRO-LIVE":
+        _check_alpha2_dd_kill(client, mode)
+
+    if should_hard_stop(REBALANCE_FAIL_HARD_STOP):
+        print("ALPHA2 HARD STOP: rebalance fail or consecutive out-of-threshold >= 3")
+        sys.exit(1)
 
     # Simulated allocation per symbol (PAPER)
     allocated = PAPER_SIMULATED_EQUITY * (SINGLE_ASSET_CAP_PCT or 0.025)
@@ -233,7 +293,8 @@ def run_cycle_paper(client=None):
 
 
 def main():
-    print(f"Alpha2 {STRATEGY_ID} PAPER mode (7 days first)")
+    mode = os.getenv("ALPHA2_LIVE_MODE") or os.getenv("ALPHA2_MODE", "PAPER")
+    print(f"Alpha2 {STRATEGY_ID} {mode} mode")
     run_cycle_paper()
     print("Cycle done. Check logs/v9_trade_records.csv (strategy_id=FUND_CARRY_V1)")
 

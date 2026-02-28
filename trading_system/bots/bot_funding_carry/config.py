@@ -20,3 +20,6 @@ COOLDOWN_HOURS = 24  # no entry for 24h after exit (annualized < 10% or <= 0)
 
 # PAPER simulated notional (for observability when no real positions)
 PAPER_SIMULATED_EQUITY = 10000.0
+
+# Alpha2 MICRO-LIVE equity DD kill (independent of V9)
+ALPHA2_MAX_DD_PCT = 0.01  # 1% drawdown => stop bot

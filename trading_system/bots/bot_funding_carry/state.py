@@ -12,6 +12,7 @@ ROOT = Path(__file__).resolve().parents[2]
 LOGS = ROOT / "logs"
 COOLDOWN_PATH = LOGS / "alpha2_cooldown.json"
 STATE_PATH = LOGS / "alpha2_state.json"
+EQUITY_PEAK_PATH = LOGS / "alpha2_equity_peak.json"
 
 
 def _ensure_logs():
@@ -116,6 +117,34 @@ def get_state_summary() -> dict:
         "consecutive_out_of_threshold": consec,
         "hard_stop_triggered": fail >= 3 or consec >= 3,
     }
+
+
+def get_equity_peak() -> float | None:
+    """Return alpha2_equity_peak or None if not set."""
+    _ensure_logs()
+    if not EQUITY_PEAK_PATH.exists():
+        return None
+    try:
+        with open(EQUITY_PEAK_PATH, "r", encoding="utf-8") as f:
+            d = json.load(f)
+        return float(d.get("alpha2_equity_peak", 0))
+    except Exception:
+        return None
+
+
+def set_equity_peak(value: float) -> None:
+    _ensure_logs()
+    with open(EQUITY_PEAK_PATH, "w", encoding="utf-8") as f:
+        json.dump({"alpha2_equity_peak": value}, f, indent=0)
+
+
+def update_equity_peak(current: float) -> float:
+    """Update peak if current > peak. Return peak after update."""
+    peak = get_equity_peak()
+    if peak is None or current > peak:
+        set_equity_peak(current)
+        return current
+    return peak
 
 
 def get_cooldown_active() -> list[tuple[str, str]]:
