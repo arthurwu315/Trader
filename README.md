@@ -420,6 +420,36 @@ Run: `python3 -m tests.run_v9_walkforward`
 
 ---
 
+## Alpha Burst B1 (ALPHA_BURST_B1)
+
+- **Purpose**: Vol-expansion Donchian breakout; burst-style alpha overlay
+- **Universe**: BTCUSDT, ETHUSDT
+- **Trend filter (4H)**: close > EMA200 = long only; close < EMA200 = short only
+- **Entry/exit (1H)**: Donchian breakout (close > roll_high_20 long, close < roll_low_20 short)
+- **Vol expansion**: ATR14 > ATR14_ma20 × 1.2 to allow trades
+- **Exit**: Initial stop ATR×k, ATR trailing stop
+- **Position sizing**: 1% burst_equity risk per trade
+- **Trade record**: `logs/alpha_burst_b1_trades.csv`; summary to `v9_trade_records.csv` (strategy_id=ALPHA_BURST_B1) when `write_to_v9=True`
+- **Ops**: Burst DD > 25% ⇒ KILL; reconcile dry-run (log only)
+- **Independent of V9**: Does not modify config_v9, config_a, v9_live_runner, deploy_v9, bot_a
+
+**Commands**
+
+- Backtest: `python3 -m tests.run_alpha_burst_backtest`
+- Report: `python3 -m tests.run_alpha_burst_report` → `tests/reports/alpha_burst_b1_report.md`
+- Grid (B2): `python3 -m tests.run_alpha_burst_grid` → `tests/reports/alpha_burst_b1_artifacts/b2_grid_results.csv`
+
+**Report sections**
+
+- B1: E[R], WinRate, AvgWin_R, AvgLoss_R, p10/p50/p90/p95 by year/symbol; INSUFFICIENT POWER when trade_count < 30
+- B2: Small grid (vol_expansion, stop_ATR_k, breakout_lookback); plateau regions
+- B3: Permutation test 1000, block bootstrap 1000 (SEED=42); percentile, p-value
+- B4: Cost stress (slippage 5/10/20 bps, high-vol 2x, fee)
+
+**State doc**: `STRATEGY_STATE_ALPHA_BURST.md`
+
+---
+
 ## Engineering Policy (Hard Rule)
 
 1. **任何策略/參數/部署變更都必須更新 README.md**
