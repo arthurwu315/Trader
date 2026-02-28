@@ -7,7 +7,7 @@ from datetime import datetime, timezone
 
 V9_TRADE_RECORD_HEADER = (
     "timestamp,symbol,side,price,qty,regime_vol,reason,fees,slippage_est,"
-    "signal_time,order_time,mode"
+    "signal_time,order_time,mode,strategy_id"
 )
 
 
@@ -38,6 +38,7 @@ def append_v9_trade_record(
     signal_time: str = "",
     order_time: str = "",
     mode: str = "PAPER",
+    strategy_id: str = "V9_REGIME_CORE",
 ):
     """Append one trade record to CSV and JSONL."""
     log_dir = ensure_log_dir()
@@ -57,6 +58,7 @@ def append_v9_trade_record(
         "signal_time": signal_time,
         "order_time": order_time,
         "mode": mode,
+        "strategy_id": strategy_id,
     }
 
     write_header = not csv_path.exists()
@@ -66,7 +68,7 @@ def append_v9_trade_record(
                 f.write(V9_TRADE_RECORD_HEADER + "\n")
             f.write(
                 f"{timestamp},{symbol},{side},{price:.8f},{qty:.8f},{regime_vol:.4f},{reason},"
-                f"{fees:.4f},{slippage_est:.4f},{signal_time},{order_time},{mode}\n"
+                f"{fees:.4f},{slippage_est:.4f},{signal_time},{order_time},{mode},{strategy_id}\n"
             )
     except Exception as e:
         print(f"  [WARN] append_v9_trade_record CSV: {e}")
@@ -97,5 +99,6 @@ def read_v9_records(csv_path: Path = None):
                 row["slippage_est"] = float(row.get("slippage_est", 0))
             except (ValueError, KeyError):
                 pass
+            row.setdefault("strategy_id", "V9_REGIME_CORE")
             rows.append(row)
     return rows

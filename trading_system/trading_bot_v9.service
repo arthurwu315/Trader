@@ -1,0 +1,22 @@
+[Unit]
+Description=V9.1 Regime-Core Trading Bot (MICRO-LIVE)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=trader
+WorkingDirectory=/home/trader/trading_system
+Environment=V9_LIVE_MODE=MICRO-LIVE
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/usr/bin/python3 -u -m v9_live_runner
+Restart=no
+RestartSec=30
+StandardOutput=journal
+StandardError=journal
+
+# V9.1: Startup prints STRATEGY_VERSION, VOL_LOW, VOL_HIGH, MODE, GIT_COMMIT
+# Health check: logs/v9_health_check.txt
+
+[Install]
+WantedBy=multi-user.target

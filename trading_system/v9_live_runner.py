@@ -13,6 +13,8 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
+# Ensure datetime imported for _write_health_check
+
 ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(ROOT))
 
@@ -27,9 +29,22 @@ def _get_mode() -> str:
 def _print_startup():
     mode = _get_mode()
     commit = _get_commit_hash()
-    print(f"STRATEGY_VERSION={STRATEGY_VERSION} VOL_LOW={VOL_LOW} VOL_HIGH={VOL_HIGH} MODE={mode}")
-    if commit:
-        print(f"GIT_COMMIT={commit}")
+    line = f"STRATEGY_VERSION={STRATEGY_VERSION} VOL_LOW={VOL_LOW} VOL_HIGH={VOL_HIGH} MODE={mode} GIT_COMMIT={commit}"
+    print(line)
+    _write_health_check(line)
+
+
+def _write_health_check(line: str):
+    """Write startup params to health check file (every startup)."""
+    try:
+        log_dir = ROOT / "logs"
+        log_dir.mkdir(parents=True, exist_ok=True)
+        path = log_dir / "v9_health_check.txt"
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(line + "\n")
+            f.write(f"# Written at {datetime.now(timezone.utc).isoformat()}\n")
+    except Exception:
+        pass
 
 
 def _get_commit_hash() -> str:

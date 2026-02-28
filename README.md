@@ -292,11 +292,23 @@ Run: `python3 -m tests.run_v9_walkforward`
   1) fees & slippage
   2) latency (signal_time vs order_time)
   3) execution correctness
-- **Exit Criteria (Promotion)**:
-  - ≥ 30 trades OR ≥ 8 weeks (whichever first)
-  - PF not &lt; 0.9 in MICRO-LIVE
-  - No governance violations (no untracked changes)
-- **Kill Switch**: If equity drawdown in MICRO-LIVE &gt; 3% or any abnormal behavior → stop bot
+
+**Exit Criteria (Two-Stage)**
+
+- **Stage 1 (Fast)**: 14 days OR 10 execution events (entry/exit/rebalance) → verify correctness, fees, slippage, latency only
+- **Stage 2**: 8 weeks OR 30 trades → evaluate PF and behavior
+- **Kill Switch**: If MICRO-LIVE equity drawdown &gt; 3% or any abnormal behavior → stop bot immediately
+
+**V9.1 Fast-Track Live Validation**
+
+- **Start MICRO-LIVE**:
+  1. `cd trading_system && ./deploy_v9.sh` (locks current commit)
+  2. `sudo cp trading_bot_v9.service /etc/systemd/system/ && sudo systemctl daemon-reload`
+  3. `sudo systemctl start trading_bot_v9`
+  4. Check: `journalctl -u trading_bot_v9 -f` for `STRATEGY_VERSION=... MODE=MICRO-LIVE GIT_COMMIT=...`
+  5. Health check: `logs/v9_health_check.txt` (written every startup)
+- **Commit hash lock**: `logs/deploy_hash.txt` after `./deploy_v9.sh [hash]`
+- **Manual run**: `V9_LIVE_MODE=MICRO-LIVE python3 -m v9_live_runner`
 
 **Trade record**: `logs/v9_trade_records.csv` (same format for PAPER & MICRO-LIVE)
 
@@ -321,6 +333,20 @@ Run: `python3 -m tests.run_v9_walkforward`
 
 ---
 
+## Alpha2: Funding Carry (Experimental) – FUND_CARRY_V1
+
+- **Purpose**: Low-correlation cash flow, add live friction samples; market neutral
+- **Strategy**: Long spot + short perp to collect funding when rate &gt; threshold
+- **Universe**: BTC, ETH (MVP)
+- **Entry**: funding_rate_8h annualized &gt; 20%
+- **Exit**: annualized &lt; 10% or negative, or single-asset loss &gt; 1%
+- **Risk**: Alpha2 capital cap 10% of total; single asset 2–3%; MICRO-LIVE 2–5% notional first
+- **Report**: `python3 -m tests.run_funding_carry_report` — funding collected, hedge pnl, costs, max adverse excursion
+- **Deploy**: PAPER 7 days first → MICRO-LIVE 2–5%
+- **Start PAPER**: `ALPHA2_MODE=PAPER python3 -m bots.bot_funding_carry.main`
+
+---
+
 ## Engineering Policy (Hard Rule)
 
 1. **任何策略/參數/部署變更都必須更新 README.md**
@@ -329,3 +355,4 @@ Run: `python3 -m tests.run_v9_walkforward`
 4. **任何 service/部署檔變更** 必須在 README 記錄「檔名 + 變更點 + 回滾方法」
 5. **任何部署模式/服務檔變更** 也必須記錄並 push
 6. **Production 必須鎖定 commit hash**（在 service 或 config 明記；可用 deploy_v9.sh）
+7. **多策略** 必須「獨立版本號、獨立 strategy_id、獨立風控上限」，禁止互相調用核心邏輯造成污染
