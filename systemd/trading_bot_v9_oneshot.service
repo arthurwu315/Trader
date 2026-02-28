@@ -1,0 +1,12 @@
+[Unit]
+Description=V9_REGIME_CORE One-shot Runner
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=trader
+WorkingDirectory=/home/trader/trading_system
+Environment=V9_LIVE_MODE=LIVE
+ExecStart=/usr/bin/python3 -u -m v9_live_runner
+StandardOutput=journal
+StandardError=journal

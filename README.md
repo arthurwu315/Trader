@@ -301,6 +301,16 @@ Run: `python3 -m tests.run_v9_walkforward`
 **每季再平衡**: 維持 50/50  
 **變更政策**: 僅允許 bug fix，不允許邏輯修改
 
+### V9 Operational Mode (Freeze Period)
+
+- V9 runs as systemd timer (oneshot)
+- No crash auto-restart
+- Execution every hour
+- **Manual trigger**: `sudo systemctl start trading_bot_v9_oneshot.service`
+- **Check next run**: `systemctl list-timers`
+- **Check logs**: `journalctl -u trading_bot_v9_oneshot.service`
+- **Deploy**: `./deploy_v9_timer.sh`
+
 ---
 
 ## V9.1 Live Validation Plan
