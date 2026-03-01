@@ -343,6 +343,8 @@ tail -n 50 trading_system/logs/v9_ops_order_test.log
 
 **`v9_ops_snapshot.csv` schema**: `timestamp,account_equity,available_balance,wallet_balance,current_notional,effective_leverage,position_count,open_orders_count,positions_detail,active_stop_orders_count,stop_orders_detail`
 
+If snapshot detects exposure (`position_count>0` or `current_notional>0`), runner prints: `[OPS ACTION] Position detected. Run Gate-2 trailing DRY-RUN verification now.`
+
 **4) Trailing updater verification**
 
 **a) No-position verification** (confirms scan log + snapshot stop_orders_detail)

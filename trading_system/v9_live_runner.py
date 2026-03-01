@@ -381,6 +381,9 @@ def main():
     else:
         print("[V9 OPS SNAPSHOT] skipped (no API credentials or fetch failed)")
 
+    if snap and (int(snap.get("position_count", 0) or 0) > 0 or float(snap.get("current_notional", 0.0) or 0.0) > 0):
+        print("[OPS ACTION] Position detected. Run Gate-2 trailing DRY-RUN verification now.")
+
     if os.getenv("V9_ORDER_CONNECTIVITY_TEST", "").strip() == "1":
         print("[V9] Running order connectivity test...")
         _run_order_connectivity_test()
