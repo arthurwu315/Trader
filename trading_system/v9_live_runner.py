@@ -386,7 +386,10 @@ def main():
 
     if os.getenv("V9_ORDER_CONNECTIVITY_TEST", "").strip() == "1":
         print("[V9] Running order connectivity test...")
-        _run_order_connectivity_test()
+        ok = _run_order_connectivity_test()
+        if not ok:
+            print("[V9] Order connectivity test failed, exiting 1")
+            sys.exit(1)
     else:
         print("(Set V9_ORDER_CONNECTIVITY_TEST=1 to run order connectivity test)")
 

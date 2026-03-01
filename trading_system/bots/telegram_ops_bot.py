@@ -149,20 +149,37 @@ def _fetch_account_api() -> dict | None:
 
 
 def _get_data() -> dict:
-    """Data source: snapshot first, else API."""
-    snap = _read_snapshot_latest()
-    if snap:
-        try:
-            return {
-                "account_equity": float(snap.get("account_equity", 0) or 0),
-                "current_notional": float(snap.get("current_notional", 0) or 0),
-                "effective_leverage": float(snap.get("effective_leverage", 0) or 0),
-                "position_count": int(float(snap.get("position_count", 0) or 0)),
-                "positions_detail": snap.get("positions_detail", ""),
-                "source": "snapshot",
-            }
-        except (ValueError, TypeError):
-            pass
+    """Data source policy: snapshot first; fallback API only if snapshot file missing."""
+    if SNAPSHOT_CSV.exists():
+        snap = _read_snapshot_latest()
+        if snap:
+            try:
+                return {
+                    "account_equity": float(snap.get("account_equity", 0) or 0),
+                    "current_notional": float(snap.get("current_notional", 0) or 0),
+                    "effective_leverage": float(snap.get("effective_leverage", 0) or 0),
+                    "position_count": int(float(snap.get("position_count", 0) or 0)),
+                    "positions_detail": snap.get("positions_detail", ""),
+                    "source": "snapshot",
+                }
+            except (ValueError, TypeError):
+                return {
+                    "account_equity": 0.0,
+                    "current_notional": 0.0,
+                    "effective_leverage": 0.0,
+                    "position_count": 0,
+                    "positions_detail": "",
+                    "source": "snapshot_parse_error",
+                }
+        return {
+            "account_equity": 0.0,
+            "current_notional": 0.0,
+            "effective_leverage": 0.0,
+            "position_count": 0,
+            "positions_detail": "",
+            "source": "snapshot_missing_rows",
+        }
+
     api_data = _fetch_account_api()
     if api_data:
         detail = " | ".join(

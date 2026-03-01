@@ -341,6 +341,19 @@ tail -n 5 trading_system/logs/v9_ops_snapshot.csv
 tail -n 50 trading_system/logs/v9_ops_order_test.log
 ```
 
+**Ops acceptance (minimal)**
+
+```bash
+systemctl list-timers | grep trading_bot_v9_oneshot
+tail -n 3 /home/trader/trading_system/logs/v9_ops_snapshot.csv
+sudo systemctl set-environment V9_ORDER_CONNECTIVITY_TEST=1 && sudo systemctl start trading_bot_v9_oneshot.service && sudo systemctl unset-environment V9_ORDER_CONNECTIVITY_TEST
+journalctl -u trading_bot_v9_oneshot.service -n 120 --no-pager | grep -E "PASS: Order connectivity test succeeded|FAIL:"
+```
+
+Telegram check:
+- Send `/ping` in the allowed chat.
+- Expect reply: `pong <UTC+8 timestamp> last_snapshot=<timestamp>`.
+
 **`v9_ops_snapshot.csv` schema**: `timestamp,account_equity,available_balance,wallet_balance,current_notional,effective_leverage,position_count,open_orders_count,positions_detail,active_stop_orders_count,stop_orders_detail`
 
 If snapshot detects exposure (`position_count>0` or `current_notional>0`), runner prints: `[OPS ACTION] Position detected. Run Gate-2 trailing DRY-RUN verification now.`
