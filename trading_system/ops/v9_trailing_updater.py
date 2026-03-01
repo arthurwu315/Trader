@@ -180,6 +180,23 @@ def _utc_day_start_now_ms() -> int:
     return int(now.replace(hour=0, minute=0, second=0, microsecond=0).timestamp() * 1000)
 
 
+def _compute_atr14_series(bars: list[dict]) -> list[float]:
+    """ATR(14) per bar index; insufficient indices return 0.0."""
+    n = len(bars)
+    if n == 0:
+        return []
+    atr = [0.0] * n
+    trs: list[float] = []
+    for i in range(1, n):
+        h = float(bars[i]["high"])
+        l = float(bars[i]["low"])
+        prev_c = float(bars[i - 1]["close"])
+        trs.append(max(h - l, abs(h - prev_c), abs(l - prev_c)))
+        if len(trs) >= 14:
+            atr[i] = sum(trs[-14:]) / 14.0
+    return atr
+
+
 def _build_extrema_from_bars(bars: list[dict], side: str, entry_day_ms: int, include_today: bool) -> tuple[float | None, int | None]:
     """
     Build extrema from entry day to last closed day.
@@ -205,6 +222,54 @@ def _build_extrema_from_bars(bars: list[dict], side: str, entry_day_ms: int, inc
         extrema = min(float(b["low"]) for b in filtered)
     last_ts = int(filtered[-1].get("timestamp", 0) or 0)
     return extrema, last_ts
+
+
+def _collect_since_entry_indices(bars: list[dict], entry_day_ms: int, include_today: bool) -> list[int]:
+    cutoff = _utc_day_start_now_ms()
+    idxs: list[int] = []
+    for i, b in enumerate(bars):
+        ts = int(b.get("timestamp", 0) or 0)
+        if ts <= 0 or ts < entry_day_ms:
+            continue
+        if not include_today and ts >= cutoff:
+            continue
+        idxs.append(i)
+    return idxs
+
+
+def _compute_candidate_from_replay(
+    bars: list[dict],
+    side: str,
+    entry_day_ms: int,
+    entry_price: float,
+    effective_trail: float,
+) -> tuple[float | None, float]:
+    """
+    Replay bar-by-bar trailing path on closed bars since entry day.
+    BUY: max(high_i - trail * atr14_i), SELL: min(low_i + trail * atr14_i)
+    Returns (candidate, atr14_today).
+    """
+    idxs = _collect_since_entry_indices(bars, entry_day_ms, include_today=False)
+    if not idxs:
+        return None, 0.0
+    atr_series = _compute_atr14_series(bars)
+    last_idx = idxs[-1]
+    atr14_today = float(atr_series[last_idx]) if last_idx < len(atr_series) else 0.0
+    if atr14_today <= 0:
+        atr14_today = entry_price * 0.015
+
+    candidate: float | None = None
+    for i in idxs:
+        atr_i = float(atr_series[i]) if i < len(atr_series) else 0.0
+        if atr_i <= 0:
+            atr_i = entry_price * 0.015
+        if side == "BUY":
+            v = float(bars[i]["high"]) - effective_trail * atr_i
+            candidate = v if candidate is None else max(candidate, v)
+        else:
+            v = float(bars[i]["low"]) + effective_trail * atr_i
+            candidate = v if candidate is None else min(candidate, v)
+    return candidate, atr14_today
 
 
 def _ensure_symbol_state(state: dict, symbol: str, side: str, entry_day_ms: int, entry_price: float, bars: list[dict]) -> dict:
@@ -258,6 +323,13 @@ def _candidate_from_extrema(side: str, extrema: float | None, atr14: float, entr
     if side == "BUY":
         return float(extrema) - effective_trail * atr14
     return float(extrema) + effective_trail * atr14
+
+
+def _fmt_entry_day(entry_day_ms: int) -> str:
+    try:
+        return datetime.fromtimestamp(entry_day_ms / 1000.0, tz=timezone.utc).strftime("%Y-%m-%d")
+    except Exception:
+        return "na"
 
 
 def _get_tick_size(client, symbol: str) -> float:
@@ -407,15 +479,19 @@ def _run_trailing_update(client, dry_run: bool, enabled: bool) -> int:
 
         st = _ensure_symbol_state(state, symbol, side, entry_day_ms, entry, bars)
         extrema, _ = _update_symbol_extrema(st, side, entry_day_ms, bars)
-        atr14 = _compute_atr_14(bars)
-        if atr14 <= 0:
-            atr14 = entry * 0.015
         effective_trail = TRAIL_MULT * HIGH_VOL_STOP_FACTOR if _is_high_vol_btc(client) else TRAIL_MULT
-        candidate = _candidate_from_extrema(side, extrema, atr14, entry, effective_trail)
+        candidate, atr14 = _compute_candidate_from_replay(
+            bars=bars,
+            side=side,
+            entry_day_ms=entry_day_ms,
+            entry_price=entry,
+            effective_trail=effective_trail,
+        )
         if candidate is None:
             extrema_txt = "na"
             print(
-                f"  [V9 TRAILING] {symbol} side={side} extrema={extrema_txt} atr14={atr14:.4f} "
+                f"  [V9 TRAILING] {symbol} side={side} entry_day={_fmt_entry_day(entry_day_ms)} "
+                f"extrema={extrema_txt} atr14={atr14:.4f} "
                 f"candidate=na current_stop={current_stop:.4f} decision=SKIP"
             )
             continue
@@ -444,7 +520,8 @@ def _run_trailing_update(client, dry_run: bool, enabled: bool) -> int:
         if not should_update:
             extrema_txt = f"{extrema:.4f}" if extrema is not None else "na"
             print(
-                f"  [V9 TRAILING] {symbol} side={side} extrema={extrema_txt} atr14={atr14:.4f} "
+                f"  [V9 TRAILING] {symbol} side={side} entry_day={_fmt_entry_day(entry_day_ms)} "
+                f"extrema={extrema_txt} atr14={atr14:.4f} "
                 f"candidate={candidate_r:.4f} current_stop={current_r:.4f} decision=SKIP"
             )
             continue
@@ -453,7 +530,8 @@ def _run_trailing_update(client, dry_run: bool, enabled: bool) -> int:
             decision = "UPDATE"
         extrema_txt = f"{extrema:.4f}" if extrema is not None else "na"
         print(
-            f"  [V9 TRAILING] {symbol} side={side} extrema={extrema_txt} atr14={atr14:.4f} "
+            f"  [V9 TRAILING] {symbol} side={side} entry_day={_fmt_entry_day(entry_day_ms)} "
+            f"extrema={extrema_txt} atr14={atr14:.4f} "
             f"candidate={candidate_r:.4f} current_stop={current_r:.4f} decision={decision}"
         )
 

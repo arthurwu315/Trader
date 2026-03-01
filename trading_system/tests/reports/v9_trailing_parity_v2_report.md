@@ -2,5 +2,5 @@
 
 ## Summary
 - total_bars: 770
-- mismatch_count (diff > 0.01): 681
-- max_abs_diff: 6562.75000000
+- mismatch_count (diff > 0.01): 0
+- max_abs_diff: 0.00000000

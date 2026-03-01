@@ -56,9 +56,10 @@
 - **Extrema state（v2）**：live 端新增 `logs/v9_trailing_state.json`，按 symbol 記錄進場後極值：
   - LONG：`max_high_since_entry`
   - SHORT：`min_low_since_entry`
-- **Candidate（v2）**：
-  - BUY：`max_high_since_entry - effective_trail * atr14_today`
-  - SELL：`min_low_since_entry + effective_trail * atr14_today`
+- **Candidate（v2）**：使用 since-entry 已收盤日線逐 bar replay（與 backtest path 對齊）：
+  - BUY：`current_sl = max(current_sl, high_i - effective_trail * atr14_i)`
+  - SELL：`current_sl = min(current_sl, low_i + effective_trail * atr14_i)`
+  - state 仍保留 `max_high_since_entry` / `min_low_since_entry` 作為可觀測資訊
 - **High-vol 判定（v2）**：使用 BTC 1D `ATR20 (SMA)` 與 `VOL_HIGH=4.2`（freeze 值）：
   - `vol_pct = atr20 / close * 100`
   - `vol_pct >= 4.2` 時套用 `HIGH_VOL_STOP_FACTOR`

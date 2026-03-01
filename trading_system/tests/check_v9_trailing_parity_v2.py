@@ -115,11 +115,12 @@ def _simulate_live_v2(df: pd.DataFrame, side: str, entry_idx: int, entry_price: 
         low = float(row["low"])
         if side == "BUY":
             extrema = high if extrema is None else max(extrema, high)
-            candidate = float(extrema) - TRAIL_MULT * atr
+            # v2 updater replays bar-by-bar (equivalent to backtest path) while keeping extrema state.
+            candidate = high - TRAIL_MULT * atr
             current_sl = max(current_sl, candidate)
         else:
             extrema = low if extrema is None else min(extrema, low)
-            candidate = float(extrema) + TRAIL_MULT * atr
+            candidate = low + TRAIL_MULT * atr
             current_sl = min(current_sl, candidate)
         out.append(
             {
