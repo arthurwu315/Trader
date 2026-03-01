@@ -10,6 +10,8 @@ import csv
 import os
 import re
 import sys
+import time
+from datetime import datetime, timezone
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -266,7 +268,13 @@ def main() -> None:
         sys.exit(1)
 
     offset = 0
+    last_heartbeat_ts = 0.0
     while True:
+        now_ts = time.time()
+        if now_ts - last_heartbeat_ts >= 60:
+            ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+            print(f"[OPS BOT] heartbeat ts={ts} (no token)")
+            last_heartbeat_ts = now_ts
         updates, offset = _poll_updates(token, offset)
         for u in updates:
             msg = u.get("message") or {}
@@ -276,6 +284,7 @@ def main() -> None:
                 continue
             if not text or not text.startswith("/"):
                 continue
+            print(f"[OPS BOT] cmd={text} from chat_id={from_chat}")
             reply = _handle_command(text)
             _send(token, chat_id, reply)
 

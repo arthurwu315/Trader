@@ -435,6 +435,14 @@ cd trading_system && python3 -m tests.check_v9_trailing_parity_v2
 - Service allows `Restart=always` (not part of strategy freeze).
 - Local self-test (no Telegram needed): `python3 -m bots.telegram_ops_bot --self-test`
 
+**Confirm bot always running (short checks):**
+
+```bash
+systemctl status v9_telegram_ops --no-pager
+ps aux | grep telegram_ops_bot | grep -v grep
+journalctl -u v9_telegram_ops -n 80 --no-pager
+```
+
 ---
 
 ## V9.1 Live Validation Plan
