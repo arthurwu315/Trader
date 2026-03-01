@@ -21,8 +21,34 @@ else
 fi
 
 echo
+echo "[snapshot age minutes]"
+python3 - <<'PY'
+from datetime import datetime, timezone
+import csv, os
+path="/home/trader/trading_system/logs/v9_ops_snapshot.csv"
+if not os.path.exists(path):
+    print("snapshot_age_min=UNKNOWN (file missing)")
+else:
+    with open(path) as f:
+        rows=list(csv.reader(f))
+    if not rows:
+        print("snapshot_age_min=UNKNOWN (empty file)")
+    else:
+        last=rows[-1]
+        ts=datetime.fromisoformat(last[0].replace("Z","+00:00"))
+        age=(datetime.now(timezone.utc)-ts).total_seconds()/60
+        print(f"snapshot_age_min={age:.1f}")
+PY
+
+echo
+echo "[last runner exit status]"
+systemctl show trading_bot_v9_oneshot.service -p ExecMainStatus --no-pager
+
+echo
 echo "[last connectivity test PASS/FAIL]"
-conn_line="$(journalctl -u trading_bot_v9_oneshot.service --no-pager | grep -E 'PASS: Order connectivity test succeeded|FAIL:' | tail -n 1 || true)"
+conn_line="$(journalctl -q -u trading_bot_v9_oneshot.service --no-pager \
+  | grep -E 'PASS: Order connectivity test succeeded|FAIL:' \
+  | tail -n 1 || true)"
 if [[ -n "$conn_line" ]]; then
   echo "$conn_line"
 else

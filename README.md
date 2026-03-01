@@ -360,6 +360,15 @@ Telegram check:
 bash ops/healthcheck_v9.sh
 ```
 
+Healthcheck 判讀準則:
+- timer 有 next run
+- `snapshot_age_min < 90`
+- `ExecMainStatus=0`
+- connectivity test 最近一次為 PASS
+- telegram service `active`
+
+If `snapshot_age_min > 90` → treat as degraded.
+
 **`v9_ops_snapshot.csv` schema**: `timestamp,account_equity,available_balance,wallet_balance,current_notional,effective_leverage,position_count,open_orders_count,positions_detail,active_stop_orders_count,stop_orders_detail`
 
 If snapshot detects exposure (`position_count>0` or `current_notional>0`), runner prints: `[OPS ACTION] Position detected. Run Gate-2 trailing DRY-RUN verification now.`
