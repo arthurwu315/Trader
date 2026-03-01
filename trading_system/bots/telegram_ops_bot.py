@@ -236,7 +236,29 @@ def _handle_command(cmd: str) -> str:
     return _cmd_help()
 
 
+def _self_test() -> int:
+    token = (os.getenv("TELEGRAM_BOT_TOKEN") or "").strip()
+    chat_id = (os.getenv("TELEGRAM_CHAT_ID") or "").strip()
+    token_mask = f"{token[:6]}...{token[-4:]}" if len(token) >= 12 else ("set" if token else "missing")
+    print("[SELF-TEST] telegram_ops_bot")
+    print(f"token_present={'yes' if bool(token) else 'no'} token_mask={token_mask}")
+    print(f"chat_id={chat_id if chat_id else 'missing'}")
+    snap = _read_snapshot_latest()
+    if snap:
+        ts = str(snap.get("timestamp", ""))
+        eq = str(snap.get("account_equity", ""))
+        pos = str(snap.get("position_count", ""))
+        notional = str(snap.get("current_notional", ""))
+        print(f"snapshot_last_row timestamp={ts} equity={eq} position_count={pos} current_notional={notional}")
+    else:
+        print("snapshot_last_row missing")
+    return 0
+
+
 def main() -> None:
+    if "--self-test" in sys.argv:
+        sys.exit(_self_test())
+
     token = (os.getenv("TELEGRAM_BOT_TOKEN") or "").strip()
     chat_id = (os.getenv("TELEGRAM_CHAT_ID") or "").strip()
     if not token or not chat_id:

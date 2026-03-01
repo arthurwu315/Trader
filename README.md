@@ -431,7 +431,9 @@ cd trading_system && python3 -m tests.check_v9_trailing_parity_v2
 - Data source: `logs/v9_ops_snapshot.csv` (prefer) or account API fetch.
 - **No trading** — only reads; cannot trigger orders or modify positions.
 - Deploy: `sudo cp systemd/v9_telegram_ops.service /etc/systemd/system/ && sudo systemctl daemon-reload && sudo systemctl enable --now v9_telegram_ops`
+- Or deploy script: `./deploy_telegram_ops.sh`
 - Service allows `Restart=always` (not part of strategy freeze).
+- Local self-test (no Telegram needed): `python3 -m bots.telegram_ops_bot --self-test`
 
 ---
 
