@@ -11,7 +11,7 @@ import os
 import re
 import sys
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -221,6 +221,7 @@ def _cmd_help() -> str:
         "/status   - equity, notional, leverage, freeze, last run\n"
         "/positions - current positions\n"
         "/equity   - futures account equity\n"
+        "/ping     - bot liveness + snapshot timestamp\n"
         "/help     - this message"
     )
 
@@ -233,6 +234,12 @@ def _handle_command(cmd: str) -> str:
         return _cmd_positions()
     if c == "/equity":
         return _cmd_equity()
+    if c == "/ping":
+        snap = _read_snapshot_latest()
+        snap_ts = str(snap.get("timestamp", "N/A")) if snap else "N/A"
+        tz8 = timezone(timedelta(hours=8))
+        now_tz8 = datetime.now(tz8).strftime("%Y-%m-%d %H:%M:%S %Z")
+        return f"pong {now_tz8} last_snapshot={snap_ts}"
     if c == "/help":
         return _cmd_help()
     return _cmd_help()
@@ -263,6 +270,7 @@ def main() -> None:
 
     token = (os.getenv("TELEGRAM_BOT_TOKEN") or "").strip()
     chat_id = (os.getenv("TELEGRAM_CHAT_ID") or "").strip()
+    print(f"[OPS BOT] start pid={os.getpid()} allowed_chat_id={chat_id or 'missing'} token_present={'yes' if bool(token) else 'no'}")
     if not token or not chat_id:
         print("TELEGRAM_BOT_TOKEN or TELEGRAM_CHAT_ID not set", file=sys.stderr)
         sys.exit(1)
@@ -280,11 +288,12 @@ def main() -> None:
             msg = u.get("message") or {}
             text = (msg.get("text") or "").strip()
             from_chat = str(msg.get("chat", {}).get("id", ""))
+            print(f"[OPS BOT] recv chat_id={from_chat} text={text[:80]}")
             if from_chat != chat_id:
+                print(f"[OPS BOT] ignore unauthorized chat_id={from_chat}")
                 continue
             if not text or not text.startswith("/"):
                 continue
-            print(f"[OPS BOT] cmd={text} from chat_id={from_chat}")
             reply = _handle_command(text)
             _send(token, chat_id, reply)
 

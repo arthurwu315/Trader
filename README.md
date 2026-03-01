@@ -426,7 +426,7 @@ cd trading_system && python3 -m tests.check_v9_trailing_parity_v2
 
 ### V9 Telegram Ops Interface
 
-- **Read-only** command bot. Commands: `/status` `/positions` `/equity` `/help`.
+- **Read-only** command bot. Commands: `/status` `/positions` `/equity` `/ping` `/help`.
 - **Independent of V9 runner** — runs as separate service, does not affect strategy execution.
 - Data source: `logs/v9_ops_snapshot.csv` (prefer) or account API fetch.
 - **No trading** — only reads; cannot trigger orders or modify positions.
@@ -442,6 +442,9 @@ systemctl status v9_telegram_ops --no-pager
 ps aux | grep telegram_ops_bot | grep -v grep
 journalctl -u v9_telegram_ops -n 80 --no-pager
 ```
+
+Then send `/ping` in Telegram private chat and verify journal contains:
+- `[OPS BOT] recv chat_id=... text=/ping`
 
 ---
 
