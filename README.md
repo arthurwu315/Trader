@@ -354,6 +354,12 @@ Telegram check:
 - Send `/ping` in the allowed chat.
 - Expect reply: `pong <UTC+8 timestamp> last_snapshot=<timestamp>`.
 
+**Daily Ops: one-liner healthcheck**
+
+```bash
+bash ops/healthcheck_v9.sh
+```
+
 **`v9_ops_snapshot.csv` schema**: `timestamp,account_equity,available_balance,wallet_balance,current_notional,effective_leverage,position_count,open_orders_count,positions_detail,active_stop_orders_count,stop_orders_detail`
 
 If snapshot detects exposure (`position_count>0` or `current_notional>0`), runner prints: `[OPS ACTION] Position detected. Run Gate-2 trailing DRY-RUN verification now.`
